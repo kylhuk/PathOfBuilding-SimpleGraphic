@@ -173,8 +173,9 @@ jobs:
           # Docker runs 32-bit userland on the x64 kernel, whose default
           # uname result would make vcpkg bootstrap an incompatible x64 host
           # tool. linux32 selects the matching process personality first.
-          # Debian 12's native Ninja is intentionally used for the x86
-          # container: vcpkg cannot download its x64-only tool bundle there.
+          # Debian 13 supplies both native 32-bit Ninja and CMake 3.31. The
+          # latter satisfies the current Sol2 port's CMake 3.26 minimum;
+          # vcpkg cannot download its x64-only tool bundle in this container.
           docker run --rm \
             --platform linux/386 \
             --volume "$GITHUB_WORKSPACE:/src" \
@@ -182,9 +183,33 @@ jobs:
             --env VCPKG_DISABLE_METRICS \
             --env VCPKG_FORCE_SYSTEM_BINARIES=1 \
             --env DEBIAN_FRONTEND=noninteractive \
-            debian:12 \
+            debian:13 \
             linux32 bash -lc '
               set -euo pipefail
+              # vcpkg keeps a port's compiler/configure output in buildtrees
+              # and only prints the path when it fails. Surface the most
+              # recently touched logs before the disposable container exits,
+              # so any future 32-bit port failure is actionable from Actions.
+              dump_vcpkg_failure_logs() {
+                failure_status=$?
+                if [ "$failure_status" -ne 0 ] && [ -d /src/vcpkg/buildtrees ]; then
+                  while IFS= read -r log; do
+                    [ -n "$log" ] || continue
+                    printf "::group::%s\\n" "$log"
+                    tail -n 240 "$log" || true
+                    echo "::endgroup::"
+                  done < <(
+                    find /src/vcpkg/buildtrees -type f \
+                      \( -name "*-out.log" -o -name "*-err.log" -o -name "*CMakeCache*.log" \) \
+                      -printf "%T@ %p\\n" |
+                      sort -nr |
+                      head -n 12 |
+                      cut -d " " -f2-
+                  )
+                fi
+                exit "$failure_status"
+              }
+              trap dump_vcpkg_failure_logs EXIT
               apt-get update
               apt-get install -y --no-install-recommends \
                 build-essential ca-certificates cmake curl git ninja-build \
