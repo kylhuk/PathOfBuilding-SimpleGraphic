@@ -20,9 +20,9 @@ vcpkg_cmake_get_vars(cmake_vars_file)
 include("${cmake_vars_file}")
 
 if(VCPKG_DETECTED_MSVC)
-    # Due to lack of better MSVC cross-build support, just always build the host
-    # minilua tool with the target toolchain. This will work for native builds and
-    # for targeting x86 from x64 hosts. (UWP and ARM64 is unsupported.)
+    # LuaJIT's current msvcbuild.bat selects ARM64 from VSCMD_ARG_TGT_ARCH and
+    # supports both native ARM64 and x64-to-ARM64 developer prompts.  Keep the
+    # target environment intact instead of rejecting arm64-windows in metadata.
     vcpkg_list(SET options)
     set(PKGCONFIG_CFLAGS "")
     if (VCPKG_LIBRARY_LINKAGE STREQUAL "static")
@@ -49,6 +49,7 @@ else()
         list(APPEND options
             "LJARCH=${VCPKG_TARGET_ARCHITECTURE}"
             "BUILDVM_X=${CURRENT_HOST_INSTALLED_DIR}/manual-tools/${PORT}/buildvm-${VCPKG_TARGET_ARCHITECTURE}${VCPKG_HOST_EXECUTABLE_SUFFIX}"
+            "HOST_LUA=${CURRENT_HOST_INSTALLED_DIR}/manual-tools/${PORT}/minilua${VCPKG_HOST_EXECUTABLE_SUFFIX}"
         )
     endif()
 
@@ -75,7 +76,12 @@ else()
         string(APPEND dasm_archs " arm64 x64")
     endif()
 
-    file(COPY "${CMAKE_CURRENT_LIST_DIR}/configure" DESTINATION "${SOURCE_PATH}")
+    file(COPY "${CMAKE_CURRENT_LIST_DIR}/configure" DESTINATION "${SOURCE_PATH}"
+        FILE_PERMISSIONS
+            OWNER_READ OWNER_WRITE OWNER_EXECUTE
+            GROUP_READ GROUP_EXECUTE
+            WORLD_READ WORLD_EXECUTE
+    )
     vcpkg_configure_make(SOURCE_PATH "${SOURCE_PATH}"
         COPY_SOURCE
         OPTIONS
@@ -102,7 +108,20 @@ file(REMOVE_RECURSE
     "${CURRENT_PACKAGES_DIR}/share/man"
 )
 
+file(REMOVE
+    "${CURRENT_PACKAGES_DIR}/bin/luajit-symlink"
+    "${CURRENT_PACKAGES_DIR}/debug/bin/luajit-symlink"
+)
 vcpkg_copy_tools(TOOL_NAMES luajit AUTO_CLEAN)
+
+# The Windows launcher resolves LuaJIT scripts relative to the tool.  Copy
+# the built tree so generated vmdef.lua matches the staged executable.
+if(VCPKG_TARGET_IS_WINDOWS)
+    file(COPY
+        "${CURRENT_BUILDTREES_DIR}/${TARGET_TRIPLET}-rel/src/jit"
+        DESTINATION "${CURRENT_PACKAGES_DIR}/tools/luajit/lua"
+    )
+endif()
 
 vcpkg_fixup_pkgconfig()
 

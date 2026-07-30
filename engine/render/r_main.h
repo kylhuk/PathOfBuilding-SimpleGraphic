@@ -12,8 +12,11 @@
 
 #include <array>
 #include <chrono>
+#include <cstddef>
 #include <deque>
 #include <imgui.h>
+#include <memory>
+#include <new>
 #include <vector>
 
 // =======
@@ -31,7 +34,23 @@ struct r_viewport_s {
 // Render layer
 class r_layer_c {
 public:
-	std::vector<std::byte> cmdStorage;
+	struct CmdStorageDeleter {
+		void operator()(void* ptr) const noexcept
+		{
+			::operator delete(ptr);
+		}
+	};
+
+	struct CmdStorageBlock {
+		std::unique_ptr<void, CmdStorageDeleter> data{ nullptr };
+		size_t capacity = 0;
+		size_t used = 0;
+	};
+
+	// Command payload is allocated in aligned blocks.  Keeping the backing
+	// addresses stable avoids unaligned ARM accesses and means a layer can grow
+	// without invalidating commands that are already queued for rendering.
+	std::vector<CmdStorageBlock> cmdStorage;
 	size_t	cmdCursor{};
 	size_t	numCmd{};
 
@@ -50,7 +69,8 @@ public:
 	void    Discard();
 
 	struct CmdHandle {
-		uint32_t offset;
+		size_t block = 0;
+		size_t offset = 0;
 		struct r_layerCmd_s* cmd;
 	};
 
@@ -60,7 +80,8 @@ public:
 private:
 	r_renderer_c* renderer;
 
-	struct r_layerCmd_s* NewCommand(size_t size);
+	void* NewCommand(size_t size);
+	bool AddCommandBlock(size_t minimumCapacity);
 };
 
 // Renderer Main Class

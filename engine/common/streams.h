@@ -59,6 +59,7 @@ private:
 	byte* mem;
 	size_t memLen;
 	size_t memPos;
+	bool ownsMem;
 };
 
 class memOutputStream_c: public ioStream_c {

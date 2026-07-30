@@ -1,0 +1,139 @@
+name: Publish release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version without the leading v (for example 2.6.0).
+        required: true
+        type: string
+      source_ref:
+        description: master or an immutable commit SHA at the current master tip.
+        required: true
+        default: master
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: production-release
+  cancel-in-progress: false
+
+jobs:
+  validate_release:
+    name: Validate release request
+    runs-on: ubuntu-24.04
+    outputs:
+      source_sha: ${{ steps.release_request.outputs.source_sha }}
+      tag: ${{ steps.release_request.outputs.tag }}
+      prerelease: ${{ steps.release_request.outputs.prerelease }}
+    steps:
+      - name: Checkout requested source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_ref }}
+          fetch-depth: 2
+          submodules: recursive
+
+      - name: Validate version, provenance, and tag availability
+        id: release_request
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/check_release.py --version "$RELEASE_VERSION"
+          git fetch --no-tags origin master --depth=1
+          source_sha="$(git rev-parse HEAD)"
+          master_sha="$(git rev-parse origin/master)"
+          if [ "$source_sha" != "$master_sha" ]; then
+            echo "Releases must be built from the current master tip." >&2
+            exit 1
+          fi
+          tag="v$RELEASE_VERSION"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            echo "Tag $tag already exists." >&2
+            exit 1
+          fi
+          version_without_build="${RELEASE_VERSION%%+*}"
+          if [[ "$version_without_build" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build all release packages
+    needs: validate_release
+    uses: ./.github/workflows/build-runtime.yml
+    with:
+      source_ref: ${{ needs.validate_release.outputs.source_sha }}
+      artifact_prefix: release-${{ needs.validate_release.outputs.tag }}
+      retention_days: 30
+      # Releases are manual-only and validate that source_ref is the current
+      # master tip, so their optional Windows 10 coverage may use the
+      # repository's self-hosted runners.
+      allow_self_hosted_smoke: true
+
+  publish:
+    name: Create GitHub release
+    needs:
+      - validate_release
+      - build
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate_release.outputs.source_sha }}
+          fetch-depth: 1
+
+      - name: Download all release archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_PREFIX: release-${{ needs.validate_release.outputs.tag }}-
+        run: |
+          set -euo pipefail
+          mkdir -p release-artifacts
+          gh run download "$GITHUB_RUN_ID" --pattern "${ARTIFACT_PREFIX}*" --dir release-artifacts
+          count="$(find release-artifacts -type f \( -name '*.zip' -o -name '*.tar.gz' \) | wc -l | tr -d ' ')"
+          if [ "$count" != 8 ]; then
+            echo "Expected 8 platform archives, found $count." >&2
+            find release-artifacts -type f -print >&2
+            exit 1
+          fi
+
+      - name: Generate checksums and release manifest
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          SOURCE_SHA: ${{ needs.validate_release.outputs.source_sha }}
+        run: |
+          python3 scripts/ci/release_manifest.py \
+            --directory release-artifacts \
+            --version "$RELEASE_VERSION" \
+            --source-sha "$SOURCE_SHA"
+
+      - name: Publish immutable release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.validate_release.outputs.tag }}
+          IS_PRERELEASE: ${{ needs.validate_release.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          mapfile -d '' assets < <(find release-artifacts -type f \( -name '*.zip' -o -name '*.tar.gz' -o -name 'SHA256SUMS.txt' -o -name 'release-manifest.json' \) -print0 | sort -z)
+          release_options=()
+          if [ "$IS_PRERELEASE" = "true" ]; then
+            release_options+=(--prerelease)
+          fi
+          gh release create "$RELEASE_TAG" "${assets[@]}" \
+            --target "${{ needs.validate_release.outputs.source_sha }}" \
+            --title "$RELEASE_TAG" \
+            "${release_options[@]}" \
+            --generate-notes

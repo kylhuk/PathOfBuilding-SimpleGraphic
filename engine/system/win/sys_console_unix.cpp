@@ -143,7 +143,7 @@ void sys_console_c::Print(const char* text)
 
 	// Append to the output
 	std::cerr << winText << std::flush;
-	delete winText;
+	FreeString(winText);
 }
 
 void sys_console_c::CopyToClipboard()

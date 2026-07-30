@@ -64,6 +64,6 @@ public:
 	char*	exitMsg = nullptr;
 	char*	threadError = nullptr;
 	bool	errorRaised = false;
-	std::chrono::system_clock::time_point baseTime;
+	std::chrono::steady_clock::time_point baseTime;
 	std::vector<uint8_t> heldKeyState;
 };

@@ -1,8 +1,16 @@
 {
   "name": "path-of-building-simplegraphic",
-  "version": "2.5",
+  "version-semver": "2.6.0",
   "dependencies": [
-    "angle",
+    {
+      "name": "angle",
+      "features": [
+        {
+          "name": "metal",
+          "platform": "osx"
+        }
+      ]
+    },
     "curl",
     "fmt",
     "glfw3",

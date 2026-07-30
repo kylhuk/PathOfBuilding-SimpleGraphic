@@ -80,6 +80,59 @@ ui_main_c::ui_main_c(sys_IMain* sysHnd, core_IMain* coreHnd)
 	renderer = NULL;
 }
 
+static void PrependLuaPackagePath(lua_State* state, char const* field, std::string const& entries)
+{
+	if (!state) {
+		return;
+	}
+
+	lua_getglobal(state, "package");
+	if (!lua_istable(state, -1)) {
+		lua_pop(state, 1);
+		return;
+	}
+	lua_getfield(state, -1, field);
+	char const* oldValue = lua_tostring(state, -1);
+	std::string combined = entries;
+	if (oldValue && *oldValue) {
+		combined += ";";
+		combined += oldValue;
+	}
+	lua_pop(state, 1);
+	lua_pushlstring(state, combined.c_str(), combined.size());
+	lua_setfield(state, -2, field);
+	lua_pop(state, 1);
+}
+
+static void ConfigureLuaScriptSearchPath(lua_State* state, std::filesystem::path const& scriptDirectory)
+{
+	auto root = scriptDirectory.generic_u8string();
+	if (!root.empty()) {
+		PrependLuaPackagePath(state, "path", root + "/?.lua;" + root + "/?/init.lua");
+	}
+}
+
+void ConfigureLuaSearchPaths(lua_State* state, std::filesystem::path const& runtimePath)
+{
+	if (!state) {
+		return;
+	}
+
+	auto root = runtimePath.generic_u8string();
+	if (root.empty()) {
+		return;
+	}
+#ifdef _WIN32
+	constexpr char moduleSuffix[] = ".dll";
+#else
+	constexpr char moduleSuffix[] = ".so";
+#endif
+
+	const std::string luaRoot = root + "/lua";
+	PrependLuaPackagePath(state, "path", luaRoot + "/?.lua;" + luaRoot + "/?/init.lua");
+	PrependLuaPackagePath(state, "cpath", luaRoot + "/?" + moduleSuffix + ";" + luaRoot + "/?/core" + moduleSuffix);
+}
+
 // =======================
 // Lua Interface Utilities
 // =======================
@@ -265,7 +318,10 @@ void ui_main_c::RenderInit(r_featureFlag_e features)
 	sys->con->ExecCommands(true);
 
 	// Initialise window
-	core->video->Apply();
+	if (core->video->Apply()) {
+		sys->Error("Unable to initialise the graphics window.");
+		return;
+	}
 
 	// Initialise renderer
 	renderer = r_IRenderer::GetHandle(sys);
@@ -315,6 +371,9 @@ void ui_main_c::ScriptInit()
 	lua_pushcfunction(L, InitAPI);
 	int err = lua_pcall(L, 0, 0, 0);
 	if (err) sys->Error("Error initialising Lua environment: \n%s\n", lua_tostring(L, -1));
+	// The process returns to basePath around script execution; keep the
+	// selected script's local Lua modules resolvable without relying on CWD.
+	ConfigureLuaScriptSearchPath(L, scriptWorkDir);
 	lua_gc(L, LUA_GCRESTART, -1);
 
 	// Setup debug system
@@ -402,10 +461,10 @@ void ui_main_c::Frame()
 
 	// Run subscript system
 	for (dword i = 0; i < subScriptSize; i++) {
-		if (subScriptList[i]) {
-			subScriptList[i]->SubScriptFrame();
-			if ( !subScriptList[i]->IsRunning() ) {
-				ui_ISubScript::FreeHandle(subScriptList[i]);
+		if (auto* subScript = subScriptList[i]) {
+			subScript->SubScriptFrame();
+			if (subScriptList[i] == subScript && !subScript->IsRunning()) {
+				ui_ISubScript::FreeHandle(subScript);
 				subScriptList[i] = NULL;
 			}
 		}
@@ -459,7 +518,9 @@ void ui_main_c::ScriptShutdown()
 			ui_ISubScript::FreeHandle(subScriptList[i]);
 		}
 	}
-	delete subScriptList;
+	delete[] subScriptList;
+	subScriptList = nullptr;
+	subScriptSize = 0;
 	ui_IDebug::FreeHandle(debug);
 
 	// Shutdown Lua
@@ -494,7 +555,9 @@ void ui_main_c::Shutdown()
 	for (int a = 0; a < scriptArgc; a++) {
 		FreeString(scriptArgv[a]);
 	}
-	delete scriptArgv;
+	delete[] scriptArgv;
+	scriptArgv = nullptr;
+	scriptArgc = 0;
 }
 
 bool ui_main_c::CanExit()

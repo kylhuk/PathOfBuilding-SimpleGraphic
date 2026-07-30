@@ -4,9 +4,17 @@
 // Module: Render Texture
 //
 
-#include <mutex>
-#include <vector>
 #include <atomic>
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <condition_variable>
+#include <cstring>
+#include <exception>
+#include <filesystem>
+#include <mutex>
+#include <thread>
+#include <vector>
 #include "r_local.h"
 
 #include "cmp_core.h"
@@ -18,7 +26,7 @@
 // Predefined textures
 // ===================
 
-static const byte t_whiteImage[64] = { 
+static const byte t_whiteImage[64] = {
 	0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
 	0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
 	0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
@@ -41,6 +49,15 @@ static const byte t_defaultTexture[64] = {
 	0x7F, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x7F,
 	0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F
 };
+
+static std::unique_ptr<image_c> MakeFallbackTextureImage()
+{
+	auto image = std::make_unique<image_c>();
+	if (!image->CopyRaw(IMGTYPE_GRAY, 8, 8, t_defaultTexture)) {
+		return {};
+	}
+	return image;
+}
 
 // =======================
 // r_ITexManager Interface
@@ -74,9 +91,10 @@ private:
 	std::vector<std::thread> workers;
 	std::vector<r_tex_c *> textureQueue;
 	std::mutex mutex;
+	std::condition_variable queueCondition;
+	std::condition_variable stateCondition;
 
 	std::vector<r_tex_c *> uploadQueue;
-	std::mutex uploadMutex;
 
 	void	ThreadProc() override;
 };
@@ -99,7 +117,8 @@ t_manager_c::t_manager_c(r_renderer_c* renderer)
 
 	doRun = true;
 	runnersRunning = 0;
-	const int runnersWanted = 4;
+	const auto hardwareThreads = std::thread::hardware_concurrency();
+	const int runnersWanted = std::clamp(static_cast<int>(hardwareThreads ? hardwareThreads / 2 : 1), 1, 4);
 
 	for (int i = 0; i < runnersWanted; ++i)
 	{
@@ -107,20 +126,18 @@ t_manager_c::t_manager_c(r_renderer_c* renderer)
 			ThreadProc();
 			});
 	}
-	//ThreadStart();
 	while (runnersRunning < runnersWanted) {
-		renderer->sys->Sleep( 1 );
+		renderer->sys->Sleep(1);
 	}
 }
 
 t_manager_c::~t_manager_c()
 {
 	doRun = false;
+	queueCondition.notify_all();
 	for (auto& worker : workers)
 		worker.join();
-
-	for (auto tex : textureQueue)
-		delete tex;
+	textureQueue.clear();
 
 	delete whiteTex;
 	delete blackTex;
@@ -133,65 +150,101 @@ t_manager_c::~t_manager_c()
 int t_manager_c::GetAsyncCount()
 {
 	std::lock_guard<std::mutex> lock ( mutex );
-	return (int)textureQueue.size();
+	return static_cast<int>(textureQueue.size() + uploadQueue.size());
 }
 
 void t_manager_c::ProcessPendingTextureUploads()
 {
-	std::unique_lock lk(uploadMutex);
-	for (auto tex : uploadQueue) {
-		r_tex_c::PerformUpload(tex);
-	}
-	uploadQueue.clear();
-}
+	for (;;) {
+		r_tex_c* tex = nullptr;
+		{
+			std::unique_lock<std::mutex> lock(mutex);
+			if (uploadQueue.empty()) {
+				return;
+			}
+			tex = uploadQueue.back();
+			uploadQueue.pop_back();
+			if (tex->status != r_tex_c::PENDING_UPLOAD) {
+				continue;
+			}
+			tex->status = r_tex_c::UPLOADING;
+		}
 
+		r_tex_c::PerformUpload(tex);
+
+		// AsyncRemove waits for all ownership transitions under this mutex.
+		// The texture is now terminal (DONE or INIT) and therefore safe to
+		// destroy once a waiter has observed the notification.
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			stateCondition.notify_all();
+		}
+	}
+}
 bool t_manager_c::AsyncAdd(r_tex_c* tex)
 {
-	std::lock_guard<std::mutex> lock( mutex );
-	if ( runnersRunning == 0 ) {
+	std::lock_guard<std::mutex> lock(mutex);
+	if (runnersRunning == 0 || !doRun) {
 		return true;
 	}
-	textureQueue.push_back( tex );
+	textureQueue.push_back(tex);
 	tex->status = r_tex_c::IN_QUEUE;
+	queueCondition.notify_one();
 	return false;
 }
 
 bool t_manager_c::AsyncRemove(r_tex_c* tex)
 {
-	{
-		std::lock_guard<std::mutex> lock( mutex );
-		if (tex->status == r_tex_c::IN_QUEUE) {
-			for (auto itr = textureQueue.begin(); itr != textureQueue.end(); ++itr) {
-				if (*itr == tex) {
-					textureQueue.erase( itr );
-					tex->status = r_tex_c::INIT;
-					return false;
-				}
+	std::unique_lock<std::mutex> lock(mutex);
+	if (tex->status == r_tex_c::IN_QUEUE) {
+		for (auto itr = textureQueue.begin(); itr != textureQueue.end(); ++itr) {
+			if (*itr == tex) {
+				textureQueue.erase(itr);
+				tex->status = r_tex_c::INIT;
+				stateCondition.notify_all();
+				return true;
 			}
 		}
 	}
-	while (tex->status == r_tex_c::PROCESSING || tex->status == r_tex_c::SIZE_KNOWN) {
-		renderer->sys->Sleep( 1 );
-	}
+
+	stateCondition.wait(lock, [tex] {
+		const auto status = tex->status.load();
+		return status != r_tex_c::PROCESSING
+			&& status != r_tex_c::SIZE_KNOWN
+			&& status != r_tex_c::UPLOADING;
+	});
 
 	if (tex->status == r_tex_c::PENDING_UPLOAD) {
-		RemovePendingTextureUpload(tex);
+		if (auto I = std::find(uploadQueue.begin(), uploadQueue.end(), tex); I != uploadQueue.end()) {
+			uploadQueue.erase(I);
+			tex->status = r_tex_c::INIT;
+			stateCondition.notify_all();
+		}
 	}
-	
-	return true;
+
+	return false;
 }
 
 void t_manager_c::EnqueueTextureUpload(r_tex_c* tex)
 {
-	std::scoped_lock lk(uploadMutex);
-	uploadQueue.push_back(tex);
+	std::lock_guard<std::mutex> lock(mutex);
+	if (tex->status == r_tex_c::INIT
+		|| tex->status == r_tex_c::PROCESSING
+		|| tex->status == r_tex_c::SIZE_KNOWN) {
+		uploadQueue.push_back(tex);
+		tex->status = r_tex_c::PENDING_UPLOAD;
+		stateCondition.notify_all();
+	}
 }
 
 void t_manager_c::RemovePendingTextureUpload(r_tex_c* tex)
 {
-	std::scoped_lock lk(uploadMutex);
-	if (auto I = std::find(uploadQueue.begin(), uploadQueue.end(), tex); I != uploadQueue.end())
+	std::lock_guard<std::mutex> lock(mutex);
+	if (auto I = std::find(uploadQueue.begin(), uploadQueue.end(), tex); I != uploadQueue.end()) {
 		uploadQueue.erase(I);
+		tex->status = r_tex_c::INIT;
+		stateCondition.notify_all();
+	}
 }
 
 void t_manager_c::ThreadProc()
@@ -200,7 +253,11 @@ void t_manager_c::ThreadProc()
 	while (doRun) {
 		r_tex_c *doTex = nullptr;
 		{
-			std::lock_guard<std::mutex> lock( mutex );
+			std::unique_lock<std::mutex> lock(mutex);
+			queueCondition.wait(lock, [this] { return !doRun || !textureQueue.empty(); });
+			if (!doRun) {
+				break;
+			}
 
 			// Find a texture with the highest loading priority
 			int maxPri = 0;
@@ -219,76 +276,28 @@ void t_manager_c::ThreadProc()
 				doTex->status = r_tex_c::PROCESSING;
 			}
 		}
-	
+
 		if (doTex != nullptr) {
-			// Load this texture
-			doTex->LoadFile();
+			// Load this texture. A malformed file or allocation failure must not
+			// let an exception escape a worker thread and terminate the process.
+			try {
+				doTex->LoadFile();
+			}
+			catch (std::exception const&) {
+				doTex->error.store(1, std::memory_order_relaxed);
+				doTex->img = MakeFallbackTextureImage();
+				EnqueueTextureUpload(doTex);
+			}
+			catch (...) {
+				doTex->error.store(1, std::memory_order_relaxed);
+				doTex->img = MakeFallbackTextureImage();
+				EnqueueTextureUpload(doTex);
+			}
 			doTex = nullptr;
-		} else {
-			// Idle
-			renderer->sys->Sleep(1);
 		}
 	}
 	--runnersRunning;
-}
-
-// ===============
-// Image Resampler
-// ===============
-
-class t_sampleDim_c {
-public:
-	int		max = 0;
-	int		i1 = 0, i2 = 0;
-	double	w1 = 0.0, w2 = 0.0;
-
-	t_sampleDim_c(int imax)
-	{
-		max = imax;
-	}
-
-	void GenIndicies(double di)
-	{
-		i1 = (int)floor(di);
-		i2 = (int)ceil(di);
-		w2 = di - i1;
-		w1 = 1.0f - w2;
-		if (i2 >= max) {
-			i2 = max - 1;
-		}
-	}
-};
-
-static void T_ResampleImage(byte* in, dword in_w, dword in_h, int in_comp, byte* out, dword out_w, dword out_h)
-{
-	// Initialise sample dimensions
-	t_sampleDim_c six(in_w), siy(in_h);
-
-	double xst = (double)in_w / out_w;
-	double yst = (double)in_h / out_h;
-		
-	double dy = 0;
-	for (dword y = 0; y < out_h; y++, dy+= yst) {
-		// Generate Y indicies
-		siy.GenIndicies(dy);
-		double dx = 0;
-		for (dword x = 0; x < out_w; x++, dx+= xst) {
-			// Generate X indicies
-			six.GenIndicies(dx);
-
-			// Resample each component
-			for (int c = 0; c < in_comp; c++) {
-				out[in_comp * (y*out_w + x) + c] = 
-					(byte)
-					(
-						(double)in[in_comp * (siy.i1 * six.max + six.i1) + c] * six.w1 * siy.w1 + 
-						(double)in[in_comp * (siy.i2 * six.max + six.i1) + c] * six.w1 * siy.w2 +
-						(double)in[in_comp * (siy.i1 * six.max + six.i2) + c] * six.w2 * siy.w1 + 
-						(double)in[in_comp * (siy.i2 * six.max + six.i2) + c] * six.w2 * siy.w2 
-					);
-			}
-		}
-	}
+	stateCondition.notify_all();
 }
 
 // ====================
@@ -311,8 +320,14 @@ r_tex_c::r_tex_c(r_ITexManager* manager, std::unique_ptr<image_c> img, int flags
 	Init(manager, {}, flags);
 
 	// Direct upload
-	img = BuildMipSet(std::move(img));
-	PerformUpload(this);
+	this->img = BuildMipSet(std::move(img));
+	if (!this->img) {
+		error.store(1, std::memory_order_relaxed);
+		this->img = MakeFallbackTextureImage();
+	}
+	if (this->img) {
+		PerformUpload(this);
+	}
 }
 
 r_tex_c::~r_tex_c()
@@ -327,7 +342,7 @@ void r_tex_c::Init(r_ITexManager* i_manager, std::string_view i_fileName, int i_
 {
 	manager = (t_manager_c*)i_manager;
 	renderer = manager->renderer;
-	error = 0;
+	error.store(0, std::memory_order_relaxed);
 	status = INIT;
 	loadPri = 0;
 	texId = 0;
@@ -352,7 +367,7 @@ void r_tex_c::Unbind()
 }
 
 void r_tex_c::Enable()
-{	
+{
 	glEnable(GL_TEXTURE_2D);
 }
 
@@ -377,30 +392,32 @@ void r_tex_c::ForceLoad()
 {
 	if (status == INIT) {
 		LoadFile();
-	} else if (fileWidth == 0) {
-		// Load not pending, do it now
+	}
+	else if (status == IN_QUEUE && manager->AsyncRemove(this)) {
+		// We own it again after removing it from the worker queue.  Never load
+		// the same texture on the render and worker threads concurrently.
 		LoadFile();
 	}
 }
 
 std::unique_ptr<image_c> r_tex_c::BuildMipSet(std::unique_ptr<image_c> img)
 {
+	if (!img) {
+		return {};
+	}
+
 	const auto format = img->tex.format();
 
 	const bool blockCompressed = is_compressed(format);
-	const bool isAsync = !!(flags & TF_ASYNC);
-	const bool hasExistingMips = img->tex.layers() > 1;
-
-	auto extent = img->tex.extent();
-	const auto maxDim = (int)renderer->texMaxDim;
+	const auto maxDim = (std::max)(1, static_cast<int>(renderer->texMaxDim));
 	auto numLevels = img->tex.levels();
 
 	const auto shrinksNeeded = [&t = img->tex, maxDim] {
 		auto extent = t.extent();
 		int shrinks = 0;
-		for (; extent.x > maxDim && extent.y > maxDim; ++shrinks) {
-			extent.x /= 2;
-			extent.y /= 2;
+		for (; extent.x > maxDim || extent.y > maxDim; ++shrinks) {
+			extent.x = (std::max)(1, extent.x / 2);
+			extent.y = (std::max)(1, extent.y / 2);
 		}
 		return shrinks;
 		}();
@@ -412,21 +429,49 @@ std::unique_ptr<image_c> r_tex_c::BuildMipSet(std::unique_ptr<image_c> img)
 	// For regular textures we can resize proportionally down for the largest axis to reach the max dimension.
 
 	if (shrinksNeeded) {
-		if (shrinksNeeded >= numLevels) {
-			// Not enough levels in texture to satsify shrinking requirement.
-			if (blockCompressed) {
-				// TODO(zao): Fail hard, ignore, or decompress+rescale.
-			}
-			else {
-				// TODO(zao): Synthesise a new top level for all layers.
-				auto smallExtent = img->tex.extent(img->tex.levels() - 1);
-			}
-		}
-		else {
+		if (shrinksNeeded < static_cast<int>(numLevels)) {
 			auto& t = img->tex;
 			t = gli::texture2d_array(t,
 				t.base_layer(), t.max_layer(),
 				t.base_level() + shrinksNeeded, t.max_level());
+		}
+		else {
+			// Compressed formats cannot be resized without a decoder.  Returning
+			// no image makes the caller use the small fallback texture instead of
+			// issuing an oversized GL allocation.
+			if (blockCompressed) {
+				return {};
+			}
+
+			const int components = static_cast<int>(gli::component_count(format));
+			// stb's uint8 resampler is only valid for tightly packed 8-bit
+			// channel data; reject float, integer, and packed formats here.
+			if ((components != 1 && components != 3 && components != 4)
+				|| gli::block_size(format) != static_cast<size_t>(components)) {
+				return {};
+			}
+			const auto sourceExtent = img->tex.extent(0);
+			if (sourceExtent.x <= 0 || sourceExtent.y <= 0) {
+				return {};
+			}
+			const double scale = (std::min)(1.0,
+				(std::min)(static_cast<double>(maxDim) / sourceExtent.x,
+					static_cast<double>(maxDim) / sourceExtent.y));
+			const glm::ivec2 resizedExtent{
+				(std::max)(1, static_cast<int>(std::floor(sourceExtent.x * scale))),
+				(std::max)(1, static_cast<int>(std::floor(sourceExtent.y * scale)))
+			};
+			auto resized = gli::texture2d_array(format, resizedExtent, img->tex.layers(), 1, img->tex.swizzles());
+			const int alphaChannel = components == 4 ? 3 : STBIR_ALPHA_CHANNEL_NONE;
+			for (size_t layer = 0; layer < img->tex.layers(); ++layer) {
+				if (!stbir_resize_uint8_srgb_edgemode(
+					img->tex.data<uint8_t>(layer, 0, 0), sourceExtent.x, sourceExtent.y, sourceExtent.x * components,
+					resized.data<uint8_t>(layer, 0, 0), resizedExtent.x, resizedExtent.y, resizedExtent.x * components,
+					components, alphaChannel, 0, STBIR_EDGE_CLAMP)) {
+					return {};
+				}
+			}
+			img->tex = std::move(resized);
 		}
 	}
 
@@ -504,7 +549,7 @@ static gli::texture2d_array TranscodeTexture(gli::texture2d_array src, gli::form
 
 			for (size_t blockRow = 0; blockRow < srcBlocksPerRow; ++blockRow) {
 				const size_t rowBase = blockRow * srcBlockSize.y;
-				const size_t rowsLeft = (std::min)(4ull, dstExtent.y - rowBase);
+				const size_t rowsLeft = (std::min)(size_t{ 4 }, dstExtent.y - rowBase);
 
 				for (size_t blockCol = 0; blockCol < srcBlocksPerColumn; ++blockCol) {
 					// Read source 4x4 texel block, no branching needed.
@@ -524,7 +569,7 @@ static gli::texture2d_array TranscodeTexture(gli::texture2d_array src, gli::form
 
 						// Here we work off that dstData points at the top left pixel of the block row in the destination.
 						const size_t colBase = blockCol * srcBlockSize.x;
-						const size_t colsLeft = (std::min)(4ull, dstExtent.x - colBase);
+					const size_t colsLeft = (std::min)(size_t{ 4 }, dstExtent.x - colBase);
 						const size_t colBytesLeft = colsLeft * 4;
 						for (size_t innerRow = 0; innerRow < rowsLeft; ++innerRow) {
 							auto* dstPtr = dstData + dstRowStride * innerRow + colBase * 4;
@@ -540,10 +585,10 @@ static gli::texture2d_array TranscodeTexture(gli::texture2d_array src, gli::form
 					dstData += dstRowStride * rowsLeft;
 			}
 
-			const auto* srcEnd = srcData + src.size(srcLevel);
-			const auto* dstEnd = dstData + dst.size(dstLevel);
-			assert(srcData == srcEnd);
-			assert(dstData == dstEnd);
+			// Both source and destination cursors advance as blocks are
+			// transcoded. Their starting addresses are level-relative, so a
+			// post-loop assertion against the already advanced pointer would
+			// always be false in debug builds.
 		}
 	}
 
@@ -552,20 +597,28 @@ static gli::texture2d_array TranscodeTexture(gli::texture2d_array src, gli::form
 
 void r_tex_c::LoadFile()
 {
+	auto queueUpload = [this] {
+		if (flags & TF_ASYNC) {
+			// Worker threads only decode data; OpenGL uploads remain on the
+			// render thread.
+			manager->EnqueueTextureUpload(this);
+		}
+		else {
+			status = PENDING_UPLOAD;
+			PerformUpload(this);
+		}
+	};
+
 	if (_stricmp(fileName.c_str(), "@white") == 0) {
-		// Upload an 8x8 white image
-		auto raw = std::make_unique<image_c>();
-		raw->CopyRaw(IMGTYPE_GRAY, 8, 8, t_whiteImage);
-		Upload(*raw, TF_NOMIPMAP);
-		status = DONE;
+		img = std::make_unique<image_c>();
+		img->CopyRaw(IMGTYPE_GRAY, 8, 8, t_whiteImage);
+		queueUpload();
 		return;
 	}
 	else if (_stricmp(fileName.c_str(), "@black") == 0) {
-		// Upload an 8x8 black image
-		auto raw = std::make_unique<image_c>();
-		raw->CopyRaw(IMGTYPE_RGBA, 8, 8, t_blackImage);
-		Upload(*raw, TF_NOMIPMAP);
-		status = DONE;
+		img = std::make_unique<image_c>();
+		img->CopyRaw(IMGTYPE_RGBA, 8, 8, t_blackImage);
+		queueUpload();
 		return;
 	}
 
@@ -578,44 +631,41 @@ void r_tex_c::LoadFile()
 			this->fileHeight = height;
 			this->status = SIZE_KNOWN;
 		};
-		error = img->Load(path, sizeCallback);
-		if ( !error ) {
+			error.store(img->Load(path, sizeCallback), std::memory_order_relaxed);
+		if (error.load(std::memory_order_relaxed) == 0) {
 			const bool useTextureFormatFallback = !renderer->texBC7;
 			if (useTextureFormatFallback) {
 				if (img->tex.format() == gli::FORMAT_RGBA_BP_UNORM_BLOCK16)
 					img->tex = TranscodeTexture(img->tex, gli::FORMAT_RGBA8_UNORM_PACK8, true);
 			}
-			stackLayers = img->tex.layers();
-			const bool is_async = !!(flags & TF_ASYNC);
 			img = BuildMipSet(std::move(img));
-
-			status = PENDING_UPLOAD;
-			if (is_async) {
-				// Post a main thread task to create and fill GPU textures.
-				manager->EnqueueTextureUpload(this);
+			if (img) {
+				stackLayers.store(img->tex.layers(), std::memory_order_relaxed);
+				queueUpload();
+				return;
 			}
-			else {
-				PerformUpload(this);
-			}
-			return;
+			error.store(1, std::memory_order_relaxed);
 		}
 	}
 
-	auto raw = std::make_unique<image_c>();
-	raw->CopyRaw(IMGTYPE_GRAY, 8, 8, t_defaultTexture);
-	Upload(*raw, TF_NOMIPMAP);
-	status = DONE;
+	stackLayers.store(1, std::memory_order_relaxed);
+	img = MakeFallbackTextureImage();
+	queueUpload();
 }
 
 void r_tex_c::PerformUpload(r_tex_c* tex)
 {
+	if (!tex) {
+		return;
+	}
+	if (!tex->img) {
+		tex->status = INIT;
+		return;
+	}
 	tex->Upload(*tex->img, tex->flags);
 	tex->img = {};
 	tex->status = DONE;
 }
-
-static std::atomic<size_t> inputBytes = 0;
-static std::atomic<size_t> uploadedBytes = 0;
 
 void r_tex_c::Upload(image_c& img, int flags)
 {
@@ -632,7 +682,7 @@ void r_tex_c::Upload(image_c& img, int flags)
 	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
 
 	glTexParameteri(target, GL_TEXTURE_BASE_LEVEL, 0);
-	glTexParameteri(target, GL_TEXTURE_MAX_LEVEL, (GLint)tex.levels());
+	glTexParameteri(target, GL_TEXTURE_MAX_LEVEL, static_cast<GLint>(tex.levels() - 1));
 	glTexParameteri(target, GL_TEXTURE_SWIZZLE_R, format.Swizzles.r);
 	glTexParameteri(target, GL_TEXTURE_SWIZZLE_G, format.Swizzles.g);
 	glTexParameteri(target, GL_TEXTURE_SWIZZLE_B, format.Swizzles.b);
@@ -655,12 +705,16 @@ void r_tex_c::Upload(image_c& img, int flags)
 	}
 
 	constexpr float anisotropyCap = 16.0f;
-	static const float maxAnisotropy = [] {
-		float ret{};
-		glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &ret);
-		return ret;
+	static const bool anisotropySupported = [] {
+		char const* extensions = reinterpret_cast<char const*>(glGetString(GL_EXTENSIONS));
+		return extensions && strstr(extensions, "GL_EXT_texture_filter_anisotropic");
 		}();
-	glTexParameterf(target, GL_TEXTURE_MAX_ANISOTROPY, (std::min)(maxAnisotropy, anisotropyCap));
+	if (anisotropySupported) {
+		float maxAnisotropy = 1.0f;
+		glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &maxAnisotropy);
+		glTexParameterf(target, GL_TEXTURE_MAX_ANISOTROPY,
+			(std::max)(1.0f, (std::min)(maxAnisotropy, anisotropyCap)));
+	}
 
 	// Set repeating
 	if (flags & TF_CLAMP) {
@@ -690,7 +744,6 @@ void r_tex_c::Upload(image_c& img, int flags)
 			const int up_h = extent.y;
 
 			// Upload the mipmap
-			uploadedBytes += tex.size(miplevel);
 			const auto* data = tex.data(layer, 0, miplevel);
 			if (is_compressed(tex.format()))
 				if (isTextureArray)

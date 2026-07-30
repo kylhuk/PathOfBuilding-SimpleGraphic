@@ -50,6 +50,7 @@ public:
 	sys_main_c* sys = nullptr;
 
 	bool	initialised = false;
+	bool	glfwInitialised = false;
 	bool	ignoreDpiScale = false;
 	GLFWwindow* wnd = nullptr;
 
@@ -57,13 +58,14 @@ public:
 
 	int		numMon = 0;			// Number of monitors
 	int		priMon = 0;			// Index of primary monitor
-	struct {
+	struct Monitor {
 		GLFWmonitor* hnd = nullptr;
 		int		left = 0;
 		int		top = 0;
 		int		width = 0;
 		int		height = 0;
-	} mon[16];					// Array of monitor specs
+	};
+	std::vector<Monitor> mon;
 
 	int		defRes[2] = {};		// Default resolution
 	sys_vidSet_s cur;			// Current settings
@@ -104,7 +106,7 @@ sys_video_c::sys_video_c(sys_IMain* sysHnd)
 
 	minSize[0] = minSize[1] = 0;
 
-	strcpy(curTitle, CFG_TITLE);
+	snprintf(curTitle, sizeof(curTitle), "%s", CFG_TITLE);
 
 	int platformType = GLFW_ANGLE_PLATFORM_TYPE_NONE;
 #ifdef _WIN32
@@ -117,16 +119,18 @@ sys_video_c::sys_video_c(sys_IMain* sysHnd)
 		platformType = GLFW_ANGLE_PLATFORM_TYPE_D3D11;
 #endif
 	glfwInitHint(GLFW_ANGLE_PLATFORM_TYPE, platformType);
-	glfwInit();
+	glfwInitialised = glfwInit() == GLFW_TRUE;
 }
 
 sys_video_c::~sys_video_c()
 {
-	if (initialised) {
+	if (wnd) {
 		glfwDestroyWindow(wnd);
 	}
 
-	glfwTerminate();
+	if (glfwInitialised) {
+		glfwTerminate();
+	}
 }
 
 std::optional<std::pair<double, double>> PlatformGetCursorPos() {
@@ -352,15 +356,15 @@ bool ShouldIgnoreDpiScale() {
 
 int sys_video_c::Apply(sys_vidSet_s* set)
 {
+	if (!set || !glfwInitialised) {
+		return 1;
+	}
 	cur = *set;
 
-	GLFWmonitor** monitors = glfwGetMonitors(&numMon);
-	for (int i = 0; i < numMon; ++i) {
-		mon[i].hnd = monitors[i];
-		glfwGetMonitorPos(monitors[i], &mon[i].left, &mon[i].top);
-		GLFWvidmode const* mode = glfwGetVideoMode(monitors[i]);
-		mon[i].width = mode->width;
-		mon[i].height = mode->height;
+	RefreshMonitorInfo();
+	if (numMon == 0) {
+		sys->con->Printf("Could not enumerate a monitor.\n");
+		return 1;
 	}
 	priMon = 0;
 
@@ -429,6 +433,8 @@ int sys_video_c::Apply(sys_vidSet_s* set)
 	if (!intersectedMonitor) {
 		wrec.left = (scrSize[0] - cur.mode[0]) / 2 + mon[display].left;
 		wrec.top = (scrSize[1] - cur.mode[1]) / 2 + mon[display].top;
+		wrec.right = wrec.left + cur.mode[0];
+		wrec.bottom = wrec.top + cur.mode[1];
 	}
 	vid.pos[0] = wrec.left;
 	vid.pos[1] = wrec.top;
@@ -466,11 +472,17 @@ int sys_video_c::Apply(sys_vidSet_s* set)
 		if (!wnd) {
 			char const* errDesc = "Unknown error";
 			glfwGetError(&errDesc);
-			sys->con->Printf("Could not create window, %s\n", errDesc);
+			sys->con->Printf("Could not create window, %s\n", errDesc ? errDesc : "Unknown error");
+			return 1;
 		}
 
 		glfwMakeContextCurrent(wnd);
-		gladLoadGLES2(glfwGetProcAddress);
+		if (!gladLoadGLES2(glfwGetProcAddress)) {
+			sys->con->Printf("Could not load OpenGL ES entry points.\n");
+			glfwDestroyWindow(wnd);
+			wnd = nullptr;
+			return 1;
+		}
 
 		// Set up all our window callbacks
 		glfwSetWindowUserPointer(wnd, sys);
@@ -665,13 +677,13 @@ void sys_video_c::SetForeground()
 
 bool sys_video_c::IsActive()
 {
-	return glfwGetWindowAttrib(wnd, GLFW_FOCUSED);
+	return initialised && wnd && glfwGetWindowAttrib(wnd, GLFW_FOCUSED);
 }
 
 void sys_video_c::FramebufferSizeChanged(int width, int height)
 {
 	// Avoid persisting an invalid window size from being minimized.
-	if (!glfwGetWindowAttrib(wnd, GLFW_ICONIFIED)) {
+	if (wnd && !glfwGetWindowAttrib(wnd, GLFW_ICONIFIED)) {
 		vid.fbSize[0] = width;
 		vid.fbSize[1] = height;
 	}
@@ -680,7 +692,7 @@ void sys_video_c::FramebufferSizeChanged(int width, int height)
 void sys_video_c::SizeChanged(int width, int height, bool max)
 {
 	// Avoid persisting an invalid window size from being minimized.
-	if (!glfwGetWindowAttrib(wnd, GLFW_ICONIFIED)) {
+	if (wnd && !glfwGetWindowAttrib(wnd, GLFW_ICONIFIED)) {
 		vid.size[0] = width;
 		vid.size[1] = height;
 		vid.maximised = max;
@@ -690,7 +702,7 @@ void sys_video_c::SizeChanged(int width, int height, bool max)
 void sys_video_c::PosChanged(int x, int y)
 {
 	// Avoid persisting an invalid window location from being minimized.
-	if (!glfwGetWindowAttrib(wnd, GLFW_ICONIFIED)) {
+	if (wnd && !glfwGetWindowAttrib(wnd, GLFW_ICONIFIED)) {
 		vid.pos[0] = x;
 		vid.pos[1] = y;
 	}
@@ -721,7 +733,7 @@ bool sys_video_c::IsVisible()
 
 void sys_video_c::SetTitle(const char* title)
 {
-	strcpy(curTitle, (title && *title) ? title : CFG_TITLE);
+	snprintf(curTitle, sizeof(curTitle), "%s", (title && *title) ? title : CFG_TITLE);
 	if (initialised) {
 		glfwSetWindowTitle(wnd, curTitle);
 	}
@@ -758,12 +770,30 @@ bool sys_video_c::IsCursorOverWindow()
 
 void sys_video_c::RefreshMonitorInfo()
 {
-	GLFWmonitor** monitors = glfwGetMonitors(&numMon);
-	for (int m = 0; m < numMon; m++) {
-		mon[m].hnd = monitors[m];
-		glfwGetMonitorPos(monitors[m], &mon[m].left, &mon[m].top);
-		GLFWvidmode const* mode = glfwGetVideoMode(monitors[m]);
-		mon[m].width = mode->width;
-		mon[m].height = mode->height;
+	mon.clear();
+	numMon = 0;
+	if (!glfwInitialised) {
+		return;
 	}
+
+	int reportedMonitors = 0;
+	GLFWmonitor** monitors = glfwGetMonitors(&reportedMonitors);
+	if (!monitors || reportedMonitors <= 0) {
+		return;
+	}
+
+	mon.reserve(static_cast<size_t>(reportedMonitors));
+	for (int m = 0; m < reportedMonitors; ++m) {
+		GLFWvidmode const* mode = glfwGetVideoMode(monitors[m]);
+		if (!mode) {
+			continue;
+		}
+		Monitor monitor{};
+		monitor.hnd = monitors[m];
+		glfwGetMonitorPos(monitors[m], &monitor.left, &monitor.top);
+		monitor.width = mode->width;
+		monitor.height = mode->height;
+		mon.push_back(monitor);
+	}
+	numMon = static_cast<int>(mon.size());
 }

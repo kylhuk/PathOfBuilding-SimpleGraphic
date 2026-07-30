@@ -20,7 +20,10 @@
 #include "webp/decode.h"
 
 #include <algorithm>
+#include <array>
+#include <cstring>
 #include <filesystem>
+#include <limits>
 #include <thread>
 #include <vector>
 
@@ -39,17 +42,19 @@ bool image_c::CopyRaw(int type, dword inWidth, dword inHeight, const byte* inDat
 {
 	gli::format format = gli::format::FORMAT_UNDEFINED;
 	const glm::ivec2 extent{ inWidth, inHeight };
-	if (type == IMGTYPE_NONE)
+	if (type == IMGTYPE_NONE) {
 		tex = {};
-		
+		return true;
+	}
+
 	if (type > IMGTYPE_RGBA)
 		return false;
 
-	if (inWidth >= (1 << 15) || inHeight >= (1 << 15))
+	if (!inDat || inWidth == 0 || inHeight == 0 || inWidth >= (1 << 15) || inHeight >= (1 << 15))
 		return false;
 
 	const int comp = type & 0xF;
-	size_t dataSize = extent.x * extent.y * comp;
+	const size_t dataSize = static_cast<size_t>(inWidth) * static_cast<size_t>(inHeight) * static_cast<size_t>(comp);
 
 	switch (comp) {
 	case 0:
@@ -85,7 +90,7 @@ bool image_c::Load(std::filesystem::path const& fileName, std::optional<size_cal
 	return true; // o_O
 }
 
-bool image_c::Save(std::filesystem::path const& fileName) 
+bool image_c::Save(std::filesystem::path const& fileName)
 {
 	return true; // o_O
 }
@@ -120,16 +125,16 @@ image_c* image_c::LoaderForFile(IConsole* conHnd, std::filesystem::path const& f
 	if (dat[0] == 0xFF && dat[1] == 0xD8) {
 		// JPEG Start Of Image marker
 		return new jpeg_c(conHnd);
-	} else if (*(dword*)dat == 0x474E5089) {
+	} else if (std::memcmp(dat, "\x89PNG", 4) == 0) {
 		// 0x89 P N G
 		return new png_c(conHnd);
-	} else if (*(dword*)dat == 0x38464947) {
+	} else if (std::memcmp(dat, "GIF8", 4) == 0) {
 		// G I F 8
 		return new gif_c(conHnd);
-	} else if (*(dword*)dat == 0x20534444) {
+	} else if (std::memcmp(dat, "DDS ", 4) == 0) {
 		// D D S 0x20
 		return new dds_c(conHnd);
-	} else if (*(dword*)dat == 0x46464952) {
+	} else if (std::memcmp(dat, "RIFF", 4) == 0) {
 		// R I F F
 		return new webp_c(conHnd);
 	} else if ((dat[1] == 0 && (dat[2] == 2 || dat[2] == 3 || dat[2] == 10 || dat[2] == 11)) || (dat[1] == 1 && (dat[2] == 1 || dat[2] == 9))) {
@@ -179,7 +184,10 @@ bool targa_c::Load(std::filesystem::path const& fileName, std::optional<size_cal
 		con->Warning("TGA '%s': color mapped images not supported", nameU8.c_str());
 		return true;
 	}
-	in.Seek(hdr.idLen, SEEK_CUR);
+	if (in.Seek(hdr.idLen, SEEK_CUR)) {
+		con->Warning("TGA '%s': invalid image identifier", nameU8.c_str());
+		return true;
+	}
 	if (sizeCallback)
 		(*sizeCallback)(hdr.width, hdr.height);
 
@@ -199,34 +207,51 @@ bool targa_c::Load(std::filesystem::path const& fileName, std::optional<size_cal
 	}
 
 	// Read image
-	dword width = hdr.width;
-	dword height = hdr.height;
+	const dword width = hdr.width;
+	const dword height = hdr.height;
 	int comp = hdr.depth >> 3;
 	int type = ittable[it_m][2];
-	int rowSize = width * comp;
-	std::vector<byte> datBuf(height * rowSize);
+	if (width == 0 || height == 0 || width >= (1 << 15) || height >= (1 << 15)) {
+		con->Warning("TGA '%s': invalid image dimensions", nameU8.c_str());
+		return true;
+	}
+	const size_t rowSize = static_cast<size_t>(width) * static_cast<size_t>(comp);
+	constexpr size_t kMaxImageBytes = 512U * 1024U * 1024U;
+	if (rowSize > kMaxImageBytes / height) {
+		con->Warning("TGA '%s': image is too large", nameU8.c_str());
+		return true;
+	}
+	std::vector<byte> datBuf(static_cast<size_t>(height) * rowSize);
 	byte* dat = datBuf.data();
 	bool flipV = !(hdr.descriptor & 0x20);
 	if (hdr.imgType & 8) {
 		// Decode RLE image
 		for (dword row = 0; row < height; row++) {
-			int rowBase = (flipV? height - row - 1 : row) * rowSize;
-			int x = 0;
+			const size_t rowBase = static_cast<size_t>(flipV ? height - row - 1 : row) * rowSize;
+			size_t x = 0;
 			do {
 				byte rlehdr;
-				in.TRead(rlehdr);
-				int rlen = ((rlehdr & 0x7F) + 1) * comp; 
+				if (in.TRead(rlehdr)) {
+					con->Warning("TGA '%s': truncated RLE data", nameU8.c_str());
+					return true;
+				}
+				const size_t rlen = static_cast<size_t>((rlehdr & 0x7F) + 1) * static_cast<size_t>(comp);
 				if (x + rlen > rowSize) {
 					con->Warning("TGA '%s': invalid RLE coding (overlong row)", nameU8.c_str());
-					delete[] dat;
 					return true;
 				}
 				if (rlehdr & 0x80) {
 					byte rpk[4];
-					in.Read(rpk, comp);
-					for (int c = 0; c < rlen; c++, x++) dat[rowBase + x] = rpk[c % comp];
+					if (in.Read(rpk, static_cast<size_t>(comp))) {
+						con->Warning("TGA '%s': truncated RLE data", nameU8.c_str());
+						return true;
+					}
+					for (size_t c = 0; c < rlen; c++, x++) dat[rowBase + x] = rpk[c % static_cast<size_t>(comp)];
 				} else {
-					in.Read(dat + rowBase + x, rlen);
+					if (in.Read(dat + rowBase + x, rlen)) {
+						con->Warning("TGA '%s': truncated image data", nameU8.c_str());
+						return true;
+					}
 					x+= rlen;
 				}
 			} while (x < rowSize);
@@ -234,11 +259,17 @@ bool targa_c::Load(std::filesystem::path const& fileName, std::optional<size_cal
 	} else {
 		// Raw image
 		if (flipV) {
-			for (int row = height - 1; row >= 0; row--) {
-				in.Read(dat + row * rowSize, rowSize);
+			for (dword row = height; row-- > 0;) {
+				if (in.Read(dat + static_cast<size_t>(row) * rowSize, rowSize)) {
+					con->Warning("TGA '%s': truncated image data", nameU8.c_str());
+					return true;
+				}
 			}
 		} else {
-			in.Read(dat, height * rowSize);
+			if (in.Read(dat, static_cast<size_t>(height) * rowSize)) {
+				con->Warning("TGA '%s': truncated image data", nameU8.c_str());
+				return true;
+			}
 		}
 	}
 
@@ -409,7 +440,7 @@ bool png_c::Save(std::filesystem::path const& fileName)
 		auto out = (fileOutputStream_c*)ctx;
 		out->Write(data, size);
 	}, &out, extent.x, extent.y, comp, tex.data(0, 0, 0), extent.x * comp);
-	
+
 	return !rc;
 }
 
@@ -469,7 +500,7 @@ bool dds_c::Load(std::filesystem::path const& fileName, std::optional<size_callb
 	if (in.Read(fileData.data(), fileData.size()))
 		return true;
 
-	if (fileName.extension() == ".zst" || fileData.size() >= 4 && *(uint32_t*)fileData.data() == 0xFD2FB528) {
+	if (fileName.extension() == ".zst" || (fileData.size() >= 4 && std::memcmp(fileData.data(), "\x28\xB5\x2F\xFD", 4) == 0)) {
 		auto ret = DecompressZstandard(as_bytes(gsl::span(fileData)));
 		if (!ret.has_value())
 			return true;

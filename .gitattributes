@@ -1,0 +1,8 @@
+# The original engine sources are intentionally stored with CRLF endings.
+# Treat the carriage return as end-of-line whitespace when reviewing diffs.
+*.c whitespace=cr-at-eol
+*.cpp whitespace=cr-at-eol
+*.h whitespace=cr-at-eol
+
+# Unified diffs preserve upstream indentation after the context marker.
+*.patch whitespace=-blank-at-eol,-space-before-tab

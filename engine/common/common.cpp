@@ -6,6 +6,10 @@
 
 #include "common.h"
 
+#include <limits>
+#include <new>
+#include <stdexcept>
+
 // ===================
 // Argument List Class
 // ===================
@@ -15,9 +19,9 @@ args_c::args_c(const char* in)
 	argc = 0;
 	memset(argv, 0, sizeof(char*) * 256);
 
-	argBuf = AllocString(in);
+	argBuf = AllocString(in ? in : "");
 	char* ptr = argBuf;
-	while (*ptr) {
+	while (*ptr && argc < 256) {
 		if (isspace(*ptr)) {
 			ptr++;
 		} else if (*ptr == '"') {
@@ -69,6 +73,9 @@ void textBuffer_c::Alloc(int sz)
 {
 	// Allocate, set length and position, and null-teriminate.
 	Free();
+	if (sz < 0) {
+		sz = 0;
+	}
 	buf = new char[sz+1];
 	caret = len = sz;
 	buf[len] = 0;
@@ -83,7 +90,7 @@ void textBuffer_c::Init()
 void textBuffer_c::Free()
 {
 	// Delete buffer memory
-	delete buf;
+	delete[] buf;
 	buf = NULL;
 }
 
@@ -97,21 +104,22 @@ textBuffer_c &textBuffer_c::operator=(const char* r)
 
 void textBuffer_c::IncSize()
 {
+	char* tmp = new char[len + 2];
+	memcpy(tmp, buf, len + 1);
+	delete[] buf;
+	buf = tmp;
 	len++;
-	char* tmp = new char[len+1];
-	memcpy(tmp, buf, len);
-	tmp[len] = 0;
-	delete buf;
-	buf = tmp;	
 }
 
 void textBuffer_c::DecSize()
 {
+	if (len <= 0) {
+		return;
+	}
 	len--;
 	char* tmp = new char[len+1];
-	memcpy(tmp, buf, len);
-	tmp[len] = 0;
-	delete buf;
+	memcpy(tmp, buf, len + 1);
+	delete[] buf;
 	buf = tmp;
 }
 
@@ -150,29 +158,23 @@ bool textBuffer_c::KeyEvent(int key, int type)
 	// Backspace: delete character to left of cursor, shift remaining buffer
 	case KEY_BACK:
 		if (len && caret) {
-			for (int c = caret - 1; c <= len; c++) {
-				buf[c] = buf[c + 1];
-			}
-			if (caret > 0) caret--;
+			memmove(buf + caret - 1, buf + caret, (size_t)(len - caret + 1));
+			caret--;
 			DecSize();
 		}
 		return true;
 	// Delete: delete character above cursor, shift remaining buffer
 	case KEY_DELETE:
 		if (len && caret < len) {
-			for (int c = caret; c <= len; c++) {
-				buf[c] = buf[c + 1];
-			}
+			memmove(buf + caret, buf + caret + 1, (size_t)(len - caret));
 			DecSize();
 		}
 		return true;
 	default:
 		if (type == KE_CHAR && key >= 32) {
-			for (int c = len; c >= caret; c--) {
-				buf[c] = buf[c - 1];
-			}
-			buf[caret++] = key;
 			IncSize();
+			memmove(buf + caret + 1, buf + caret, (size_t)(len - caret));
+			buf[caret++] = key;
 			return true;
 		}
 		break;
@@ -282,7 +284,7 @@ std::u32string_view ReadColorEscape(std::u32string_view str, col3_t out)
 		break;
 	case 8:
 		{
-			int xr, xg, xb;
+			unsigned int xr{}, xg{}, xb{};
 			char buf[7]{};
 			for (size_t i = 0; i < 6; ++i) {
 				buf[i] = (char)str[i + 2];
@@ -330,6 +332,37 @@ char* _AllocStringLen(size_t len, const char* file, int line)
 void FreeString(const char* str)
 {
 	if (str) delete[] str;
+}
+
+std::string VFormatString(const char* fmt, va_list args)
+{
+	if (!fmt) {
+		return {};
+	}
+
+	va_list countArgs;
+	va_copy(countArgs, args);
+	int const count = vsnprintf(nullptr, 0, fmt, countArgs);
+	va_end(countArgs);
+	if (count < 0 || count == std::numeric_limits<int>::max()) {
+		return {};
+	}
+
+	try {
+		std::vector<char> text(static_cast<size_t>(count) + 1);
+		va_list outputArgs;
+		va_copy(outputArgs, args);
+		int const written = vsnprintf(text.data(), text.size(), fmt, outputArgs);
+		va_end(outputArgs);
+		if (written != count) {
+			return {};
+		}
+		return std::string(text.data(), static_cast<size_t>(written));
+	} catch (std::bad_alloc const&) {
+		return {};
+	} catch (std::length_error const&) {
+		return {};
+	}
 }
 
 dword StringHash(const char* str, int mask)
@@ -437,6 +470,8 @@ char* NarrowUTF8String(const wchar_t* str)
 	return NarrowCodepageString(str, CP_UTF8);
 }
 
+#endif
+
 IndexedUTF32String IndexUTF8ToUTF32(std::string_view input)
 {
 	IndexedUTF32String ret{};
@@ -500,5 +535,3 @@ IndexedUTF32String IndexUTF8ToUTF32(std::string_view input)
 	ret.text = std::u32string(codepoints.begin(), codepoints.end());
 	return ret;
 }
-
-#endif

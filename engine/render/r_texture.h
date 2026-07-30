@@ -18,7 +18,7 @@ class mip_set_c;
 // Texture
 class r_tex_c {
 public:
-	int		error;
+	std::atomic<int>	error;
 	enum Status
 	{
 		INIT,
@@ -26,6 +26,7 @@ public:
 		PROCESSING,
 		SIZE_KNOWN,
 		PENDING_UPLOAD,
+		UPLOADING,
 		DONE,
 	};
 	std::atomic<Status> status;
@@ -37,7 +38,7 @@ public:
 	std::atomic<dword> fileHeight;
 	std::unique_ptr<image_c> img;
 	GLenum target{};
-	size_t stackLayers = 1;
+	std::atomic<size_t> stackLayers = 1;
 
 	r_tex_c(class r_ITexManager* manager, std::string_view fileName, int flags);
 	r_tex_c(class r_ITexManager* manager, std::unique_ptr<image_c> img, int flags);

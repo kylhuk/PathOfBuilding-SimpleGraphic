@@ -154,7 +154,7 @@ public:
 
 	void	Buffer_Init();
 	void	Buffer_Shutdown();
-	void	Buffer_PrintLine(char* text);
+	void	Buffer_PrintLine(const char* text);
 
 	conHookEntry_s* hookFirst;
 	conHookEntry_s* hookLast;
@@ -250,11 +250,11 @@ void console_c::Buffer_Init()
 void console_c::Buffer_Shutdown()
 {
 	for (int l = 0; l < bufNumLine; l++) {
-		delete bufLines[l].buf;
+		free(bufLines[l].buf);
 	}
 }
 
-void console_c::Buffer_PrintLine(char* text)
+void console_c::Buffer_PrintLine(const char* text)
 {
 	if (bufLines[bufLast].newLine) {
 		// Start a new line
@@ -265,7 +265,7 @@ void console_c::Buffer_PrintLine(char* text)
 		} else {
 			// Overwrite first line
 			line = bufLines + bufFirst;
-			delete line->buf;
+			free(line->buf);
 			bufLen-= line->len;
 			bufFirst = (bufFirst + 1) & CON_MAXLINEMASK;
 		}
@@ -286,27 +286,28 @@ void console_c::Buffer_PrintLine(char* text)
 
 void console_c::Print(const char* text)
 {
+	if (!text) {
+		return;
+	}
+
 	// Run print hooks
 	Hook_RunHooks(text);
 
-	char line[4096];
-	int lineLen = 0;
+	std::string line;
 	for (const char* p = text; *p; p++) {
 		if (*p == '\n') {
 			// Separate into lines
-			line[lineLen] = 0;
-			Buffer_PrintLine(line);
+			Buffer_PrintLine(line.c_str());
 			bufLines[bufLast].newLine = true;
-			lineLen = 0;
+			line.clear();
 		} else {
-			line[lineLen++] = *p;
+			line.push_back(*p);
 		}
 	}
 
-	if (lineLen) {
+	if (!line.empty()) {
 		// Print the rest
-		line[lineLen] = 0;
-		Buffer_PrintLine(line);
+		Buffer_PrintLine(line.c_str());
 	}
 
 	// Scroll to the bottom
@@ -336,18 +337,9 @@ void console_c::Warning(const char* fmt, ...)
 	// Print warning text
 	va_list va;
 	va_start(va, fmt);
-#ifdef _WIN32
-	char text[4096];
-	vsprintf_s(text, 4096, fmt, va);
-#else
-	char* text{};
-	vasprintf(&text, fmt, va);
-#endif
+	std::string text = VFormatString(fmt, va);
 	va_end(va);
-	Printf("^4Warning: %s\n", text);
-#ifndef _WIN32
-	free(text);
-#endif
+	Printf("^4Warning: %s\n", text.c_str());
 }
 
 void console_c::Clear()
@@ -619,12 +611,12 @@ int console_c::Cvar_Find(std::string_view name)
 
 conVar_c* console_c::EnumCvar(int* index)
 {
-	if (*index < -1 || *index >= CON_MAXCMD - 1) {
+	if (*index < -1 || *index >= CON_MAXCVAR - 1) {
 		return NULL;
 	}
 	while (1) {
 		(*index)++;
-		if (*index >= CON_MAXCMD) {
+		if (*index >= CON_MAXCVAR) {
 			return NULL;
 		}
 		if (cvarList[*index]) {
@@ -643,12 +635,12 @@ void console_c::Execute(const char* cmd)
 	std::string_view sep = ";\n";
 	while (!newCmd.empty()) {
 		auto end = newCmd.find_first_of(sep);
-		if (end == newCmd.npos) {
-			end = newCmd.size();
-		}
 		std::string lp(newCmd.substr(0, end));
-		newCmd = newCmd.substr(end);
+		newCmd = end == newCmd.npos ? std::string_view{} : newCmd.substr(end + 1);
 
+		if (lp.empty()) {
+			continue;
+		}
 		if (cmdBuf_numLine >= CON_MAXCMDBUFFER) {
 			Warning("console command buffer overflow");
 		} else {
@@ -661,19 +653,9 @@ void console_c::Executef(const char* fmt, ...)
 {
 	va_list va;
 	va_start(va, fmt);
-#ifdef _WIN32
-	char cmd[4096];
-	vsnprintf_s(cmd, 4095, fmt, va);
-	cmd[4095] = 0;
-#else
-	char* cmd{};
-	vasprintf(&cmd, fmt, va);
-#endif
+	std::string cmd = VFormatString(fmt, va);
 	va_end(va);
-	Execute(cmd);
-#ifndef _WIN32
-	free(cmd);
-#endif
+	Execute(cmd.c_str());
 }
 
 void console_c::ExecCommands(bool deferUnknown)

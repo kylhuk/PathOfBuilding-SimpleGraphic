@@ -126,7 +126,7 @@ static ui_main_c* GetUIPtr(lua_State* L)
 * any C++ objects. To support RAII this scaffolding serves as a landing pad for
 * ui->LExpect, to transfer control to Lua but only after the call stack has been
 * unwound with normal C++ exception semantics.
-* 
+*
 * Example use site:
 * SG_LUA_CPP_FUN_BEGIN(DoTheThing)
 * {
@@ -559,12 +559,10 @@ SG_LUA_CPP_FUN_BEGIN(imgHandleLoadArtRectangle)
 
 	byte* srcPtr = srcImg->tex.data<byte>(0, 0, 0) + y1 * srcStride + x1 * comp;
 	byte* dstPtr = dstImg->tex.data<byte>(0, 0, 0);
-	for (int col = 0; col < (int)dstWidth; ++col) {
-		for (int row = 0; row < (int)dstHeight; ++row) {
-			memcpy(dstPtr, srcPtr, dstStride);
-			srcPtr += srcStride;
-			dstPtr += dstStride;
-		}
+	for (int row = 0; row < dstHeight; ++row) {
+		memcpy(dstPtr, srcPtr, dstStride);
+		srcPtr += srcStride;
+		dstPtr += dstStride;
 	}
 
 	const int flags = ParseArtFlags(ui, L, 5, n);
@@ -652,7 +650,7 @@ SG_LUA_CPP_FUN_BEGIN(imgHandleLoadArtArcBand)
 					break;
 				}
 			}
-			
+
 			// If no pixel was found to be inside, the row does not contribute.
 			if (colLo == -1)
 				continue;
@@ -861,7 +859,7 @@ static int l_SetDrawColor(lua_State* L)
 		}
 	}
 	ui->renderer->DrawColor(color);
-		
+
 	// Store last applied color from renderer
 	col4_t finalColor;
 	ui->renderer->GetDrawColor(finalColor);
@@ -869,7 +867,7 @@ static int l_SetDrawColor(lua_State* L)
 	ui->lastColor[1] = finalColor[1];
 	ui->lastColor[2] = finalColor[2];
 	ui->lastColor[3] = finalColor[3];
-		
+
 	return 0;
 }
 
@@ -1022,7 +1020,7 @@ static int l_DrawImageQuad(lua_State* L)
 	glm::vec2 xys[4]{}, uvs[4]{};
 	int stackLayer = 0;
 	std::optional<int> maskLayer{};
-	
+
 	// | n  |img| corners | uvs | stack | mask |
 	// | 9  | X | X       |	    |       |      |
 	// | 10 | X | X       |     | X     |      |
@@ -1835,16 +1833,16 @@ static int l_GetWorkDir(lua_State* L)
 	return 1;
 }
 
-static int l_LaunchSubScript(lua_State* L)
+SG_LUA_CPP_FUN_BEGIN(LaunchSubScript)
 {
 	ui_main_c* ui = GetUIPtr(L);
 	int n = lua_gettop(L);
-	ui->LAssert(L, n >= 3, "Usage: LaunchSubScript(scriptText, funcList, subList[, ...])");
+	ui->LExpect(L, n >= 3, "Usage: LaunchSubScript(scriptText, funcList, subList[, ...])");
 	for (int i = 1; i <= 3; i++) {
-		ui->LAssert(L, lua_isstring(L, i), "LaunchSubScript() argument %d: expected string, got %s", i, luaL_typename(L, i));
+		ui->LExpect(L, lua_isstring(L, i), "LaunchSubScript() argument %d: expected string, got %s", i, luaL_typename(L, i));
 	}
 	for (int i = 4; i <= n; i++) {
-		ui->LAssert(L, lua_isnil(L, i) || lua_isboolean(L, i) || lua_isnumber(L, i) || lua_isstring(L, i),
+		ui->LExpect(L, lua_isnil(L, i) || lua_isboolean(L, i) || lua_isnumber(L, i) || lua_isstring(L, i),
 			"LaunchSubScript() argument %d: only nil, boolean, number and string types can be passed to sub script", i);
 	}
 	dword slot = -1;
@@ -1856,21 +1854,27 @@ static int l_LaunchSubScript(lua_State* L)
 	}
 	if (slot == -1) {
 		slot = ui->subScriptSize;
-		ui->subScriptSize <<= 1;
-		trealloc(ui->subScriptList, ui->subScriptSize);
-		for (dword i = slot; i < ui->subScriptSize; i++) {
-			ui->subScriptList[i] = NULL;
-		}
+		const dword newSize = ui->subScriptSize << 1;
+		auto** newList = new ui_ISubScript*[newSize]{};
+		std::copy(ui->subScriptList, ui->subScriptList + ui->subScriptSize, newList);
+		delete[] ui->subScriptList;
+		ui->subScriptList = newList;
+		ui->subScriptSize = newSize;
 	}
-	ui->subScriptList[slot] = ui_ISubScript::GetHandle(ui, slot);
-	if (ui->subScriptList[slot]->Start()) {
+	auto* subScript = ui_ISubScript::GetHandle(ui, slot);
+	ui->subScriptList[slot] = subScript;
+	if (subScript->Start()) {
 		lua_pushlightuserdata(L, (void*)(uintptr_t)slot);
 	}
 	else {
-		lua_pushnil(L);
+		const std::string error = subScript->StartError();
+		ui_ISubScript::FreeHandle(subScript);
+		ui->subScriptList[slot] = nullptr;
+		ui->LExpect(L, false, "LaunchSubScript(): %s", error.c_str());
 	}
 	return 1;
 }
+SG_LUA_CPP_FUN_END()
 
 static int l_AbortSubScript(lua_State* L)
 {
@@ -1881,8 +1885,10 @@ static int l_AbortSubScript(lua_State* L)
 	dword slot = (dword)(uintptr_t)lua_touserdata(L, 1);
 	ui->LAssert(L, slot < ui->subScriptSize && ui->subScriptList[slot], "AbortSubScript() argument 1: invalid subscript ID");
 	ui->LAssert(L, ui->subScriptList[slot]->IsRunning(), "AbortSubScript(): subscript isn't running");
-	ui_ISubScript::FreeHandle(ui->subScriptList[slot]);
-	ui->subScriptList[slot] = NULL;
+	// A callback invoked from SubScriptFrame may abort its own subscript.  Do
+	// not delete the active object from inside that callback: the outer frame
+	// loop owns its lifetime and will free the stopped object safely.
+	ui->subScriptList[slot]->Stop();
 	return 0;
 }
 
@@ -2172,18 +2178,7 @@ int ui_main_c::InitAPI(lua_State* L)
 	sol::state_view lua(L);
 	luaL_openlibs(L);
 
-	// Add "lua/" subdir for non-JIT Lua
-	{
-		lua_getglobal(L, "package");
-		char const* tn = lua_typename(L, -1);
-		lua_getfield(L, -1, "path");
-		std::string old_path = lua_tostring(L, -1);
-		lua_pop(L, 1);
-		old_path += ";lua/?.lua";
-		lua_pushstring(L, old_path.c_str());
-		lua_setfield(L, -2, "path");
-		lua_pop(L, 1);
-	}
+	ConfigureLuaSearchPaths(L, GetUIPtr(L)->sys->basePath);
 
 	// Callbacks
 	lua_newtable(L);		// Callbacks table
@@ -2243,7 +2238,7 @@ int ui_main_c::InitAPI(lua_State* L)
 	textureType["Save"] = &Texture_c::Save;
 	textureType["Info"] = &Texture_c::Info;
 	textureType["IsValid"] = &Texture_c::IsValid;
-	
+
 	//textureType["SetLayer"] = &Texture_c::SetLayer;
 	//textureType["CopyImage"] = &Texture_c::CopyImage;
 	//textureType["Transcode"] = &Texture_c::Transcode;

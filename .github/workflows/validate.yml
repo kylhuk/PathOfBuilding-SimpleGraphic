@@ -1,0 +1,38 @@
+name: Validate source
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate project metadata
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          submodules: recursive
+
+      - name: Validate the source and CI contract
+        run: python3 scripts/ci/validate_project.py
+
+      - name: Test release metadata tooling
+        run: python3 scripts/ci/test_release_tools.py
+
+      - name: Test standalone launcher contracts
+        run: python3 scripts/ci/test_launcher_paths.py
+
+      - name: Check patch whitespace
+        run: git diff --check HEAD^ HEAD
