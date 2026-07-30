@@ -187,7 +187,7 @@ jobs:
             debian:12 \
             linux32 bash -lc '
               set -euo pipefail
-              # vcpkg keeps a port's compiler/configure output in buildtrees
+              # vcpkg keeps port compiler/configure output in buildtrees
               # and only prints the path when it fails. Surface the most
               # recently touched logs before the disposable container exits,
               # so any future 32-bit port failure is actionable from Actions.

@@ -78,6 +78,14 @@ def main() -> int:
             raise RuntimeError("LuaJIT's 32-bit manual buildvm architecture tokens are incomplete")
         if '"-DCMAKE_INSTALL_PREFIX=$stage"' not in build_runtime:
             raise RuntimeError("Windows runtime staging does not expand its CMake install prefix")
+        try:
+            x86_container_script = build_runtime.split("linux32 bash -lc '\n", 1)[1].split("\n            '\n", 1)[0]
+        except IndexError as error:
+            raise RuntimeError("Linux x86 container command is not a single quoted script") from error
+        if "'" in x86_container_script:
+            raise RuntimeError("Linux x86 container script contains an unsafe single quote")
+        if "cmake==3.31.1" not in x86_container_script or "--only-binary=:all:" not in x86_container_script:
+            raise RuntimeError("Linux x86 does not provision its pinned binary CMake")
         if "workflow_dispatch:" not in release or "release:" in release.split("on:", 1)[1].split("permissions:", 1)[0]:
             raise RuntimeError("release workflow must be manual-only")
         if (ROOT / ".github/workflows/main.yml").exists():
