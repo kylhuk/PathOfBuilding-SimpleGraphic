@@ -88,6 +88,8 @@ def main() -> int:
             raise RuntimeError("Windows runtime does not stage the vcpkg DLL closure")
         if build_runtime.count("if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }") < 6:
             raise RuntimeError("Windows native command failures are not propagated")
+        if "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c" not in build_runtime or "gh run download" in build_runtime:
+            raise RuntimeError("Windows 10 package smoke tests must use the pinned artifact downloader")
         luajit_configure = require(ROOT / "vcpkg-ports/ports/luajit/2026-07-20_1/configure")
         if "'LJ_TARGET_ARM 1'" not in luajit_configure or "'LJ_TARGET_X86 1'" not in luajit_configure:
             raise RuntimeError("LuaJIT's 32-bit manual buildvm architecture tokens are incomplete")

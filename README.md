@@ -27,8 +27,8 @@ Windows 10 and 11 use the same supported MSVC runtime family. GitHub does not
 offer a Windows 10 hosted image, so opt-in self-hosted Windows 10 smoke jobs
 are included for maintainers who set `ENABLE_WINDOWS10_SMOKE=true` (x64/x86
 compatibility) and/or `ENABLE_WINDOWS10_ARM64_SMOKE=true` (native ARM64).
-The matching self-hosted runners need the GitHub CLI (`gh`) available on
-`PATH`; the jobs use it to retrieve their just-built artifact.
+The matching self-hosted runners retrieve their just-built artifact through the
+pinned GitHub Actions download step, so they do not need the GitHub CLI.
 
 ## Building
 
