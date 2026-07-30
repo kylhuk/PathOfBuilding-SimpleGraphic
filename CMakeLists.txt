@@ -289,6 +289,12 @@ if (APPLE)
     find_library(CORE_FOUNDATION_LIBRARY CoreFoundation REQUIRED)
     find_library(APPLICATION_SERVICES_LIBRARY ApplicationServices REQUIRED)
     target_link_libraries(SimpleGraphic PRIVATE ${CORE_FOUNDATION_LIBRARY} ${APPLICATION_SERVICES_LIBRARY})
+    # A staged executable must link the installed dylib through its own rpath,
+    # never through CMake's build-directory install name.
+    set_target_properties(SimpleGraphic PROPERTIES
+        MACOSX_RPATH ON
+        INSTALL_NAME_DIR "@rpath"
+    )
 endif ()
 
 if (SIMPLEGRAPHIC_RUNTIME_RPATH)
