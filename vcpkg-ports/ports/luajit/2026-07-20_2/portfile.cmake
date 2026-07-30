@@ -11,7 +11,6 @@ vcpkg_from_github(
     HEAD_REF v2.1
     PATCHES
         msvcbuild.patch
-        003-do-not-set-macosx-deployment-target.patch
         pob-wide-crt.patch
         ${extra_patches}
 )
@@ -45,6 +44,14 @@ if(VCPKG_DETECTED_MSVC)
     vcpkg_copy_pdbs()
 else()
     vcpkg_list(SET options)
+    if(VCPKG_TARGET_IS_OSX)
+        if(NOT DEFINED VCPKG_OSX_DEPLOYMENT_TARGET OR VCPKG_OSX_DEPLOYMENT_TARGET STREQUAL "")
+            message(FATAL_ERROR "LuaJIT requires VCPKG_OSX_DEPLOYMENT_TARGET for a Darwin build")
+        endif()
+        vcpkg_list(APPEND options
+            "MACOSX_DEPLOYMENT_TARGET=${VCPKG_OSX_DEPLOYMENT_TARGET}"
+        )
+    endif()
     if(VCPKG_CROSSCOMPILING)
         list(APPEND options
             "LJARCH=${VCPKG_TARGET_ARCHITECTURE}"

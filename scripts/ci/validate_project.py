@@ -129,7 +129,8 @@ def main() -> int:
             raise RuntimeError("Windows native command failures are not propagated")
         if "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c" not in build_runtime or "gh run download" in build_runtime:
             raise RuntimeError("Windows 10 package smoke tests must use the pinned artifact downloader")
-        luajit_configure = require(ROOT / "vcpkg-ports/ports/luajit/2026-07-20_1/configure")
+        luajit_current = ROOT / "vcpkg-ports/ports/luajit/2026-07-20_2"
+        luajit_configure = require(luajit_current / "configure")
         if "'LJ_TARGET_ARM 1'" not in luajit_configure or "'LJ_TARGET_X86 1'" not in luajit_configure:
             raise RuntimeError("LuaJIT's 32-bit manual buildvm architecture tokens are incomplete")
         if '"-DCMAKE_INSTALL_PREFIX=$stage"' not in build_runtime:
@@ -152,20 +153,39 @@ def main() -> int:
             or "--macos-deployment-target" not in build_runtime
         ):
             raise RuntimeError("macOS deployment target is not propagated through CI")
-        luajit_port = require(ROOT / "vcpkg-ports/ports/luajit/2026-07-20_1/portfile.cmake")
+        luajit_port = require(luajit_current / "portfile.cmake")
         if (
             "MACOSX_DEPLOYMENT_TARGET=" not in luajit_port
             or "VCPKG_OSX_DEPLOYMENT_TARGET for a Darwin build" not in luajit_port
         ):
             raise RuntimeError("LuaJIT does not receive the macOS deployment target")
-        luajit_makefile = require(ROOT / "vcpkg-ports/ports/luajit/2026-07-20_1/configure")
+        luajit_makefile = require(luajit_current / "configure")
         if (
             "LUAJIT_MACOSX_DEPLOYMENT_TARGET" not in luajit_makefile
             or "export MACOSX_DEPLOYMENT_TARGET" not in luajit_makefile
         ):
             raise RuntimeError("LuaJIT's generated Makefile does not export its deployment target")
-        if (ROOT / "vcpkg-ports/ports/luajit/2026-07-20_1/003-do-not-set-macosx-deployment-target.patch").exists():
+        if (luajit_current / "003-do-not-set-macosx-deployment-target.patch").exists():
             raise RuntimeError("LuaJIT still suppresses missing macOS deployment-target errors")
+        luajit_versions = json.loads(require(ROOT / "vcpkg-ports/versions/l-/luajit.json"))
+        luajit_baselines = json.loads(require(ROOT / "vcpkg-ports/versions/baseline.json"))
+        for baseline_name, packages in luajit_baselines.items():
+            selected = packages.get("luajit")
+            if selected is None:
+                continue
+            matches = [
+                version for version in luajit_versions["versions"]
+                if version["version-date"] == selected["baseline"]
+                and version.get("port-version", 0) == selected.get("port-version", 0)
+            ]
+            if len(matches) != 1 or not matches[0]["path"].startswith("$/"):
+                raise RuntimeError(f"LuaJIT registry baseline {baseline_name} is not immutable")
+            manifest = json.loads(require(ROOT / "vcpkg-ports" / matches[0]["path"][2:] / "vcpkg.json"))
+            if (
+                manifest.get("version-date") != selected["baseline"]
+                or manifest.get("port-version", 0) != selected.get("port-version", 0)
+            ):
+                raise RuntimeError(f"LuaJIT registry baseline {baseline_name} points to the wrong port revision")
         if "workflow_dispatch:" not in release or "release:" in release.split("on:", 1)[1].split("permissions:", 1)[0]:
             raise RuntimeError("release workflow must be manual-only")
         if (ROOT / ".github/workflows/main.yml").exists():
