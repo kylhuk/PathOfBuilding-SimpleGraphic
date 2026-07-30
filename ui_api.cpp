@@ -1833,16 +1833,16 @@ static int l_GetWorkDir(lua_State* L)
 	return 1;
 }
 
-static int l_LaunchSubScript(lua_State* L)
+SG_LUA_CPP_FUN_BEGIN(LaunchSubScript)
 {
 	ui_main_c* ui = GetUIPtr(L);
 	int n = lua_gettop(L);
-	ui->LAssert(L, n >= 3, "Usage: LaunchSubScript(scriptText, funcList, subList[, ...])");
+	ui->LExpect(L, n >= 3, "Usage: LaunchSubScript(scriptText, funcList, subList[, ...])");
 	for (int i = 1; i <= 3; i++) {
-		ui->LAssert(L, lua_isstring(L, i), "LaunchSubScript() argument %d: expected string, got %s", i, luaL_typename(L, i));
+		ui->LExpect(L, lua_isstring(L, i), "LaunchSubScript() argument %d: expected string, got %s", i, luaL_typename(L, i));
 	}
 	for (int i = 4; i <= n; i++) {
-		ui->LAssert(L, lua_isnil(L, i) || lua_isboolean(L, i) || lua_isnumber(L, i) || lua_isstring(L, i),
+		ui->LExpect(L, lua_isnil(L, i) || lua_isboolean(L, i) || lua_isnumber(L, i) || lua_isstring(L, i),
 			"LaunchSubScript() argument %d: only nil, boolean, number and string types can be passed to sub script", i);
 	}
 	dword slot = -1;
@@ -1870,10 +1870,11 @@ static int l_LaunchSubScript(lua_State* L)
 		const std::string error = subScript->StartError();
 		ui_ISubScript::FreeHandle(subScript);
 		ui->subScriptList[slot] = nullptr;
-		return luaL_error(L, "LaunchSubScript(): %s", error.c_str());
+		ui->LExpect(L, false, "LaunchSubScript(): %s", error.c_str());
 	}
 	return 1;
 }
+SG_LUA_CPP_FUN_END()
 
 static int l_AbortSubScript(lua_State* L)
 {

@@ -28,6 +28,7 @@ jobs:
     outputs:
       source_sha: ${{ steps.release_request.outputs.source_sha }}
       tag: ${{ steps.release_request.outputs.tag }}
+      prerelease: ${{ steps.release_request.outputs.prerelease }}
     steps:
       - name: Checkout requested source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -54,6 +55,12 @@ jobs:
           if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
             echo "Tag $tag already exists." >&2
             exit 1
+          fi
+          version_without_build="${RELEASE_VERSION%%+*}"
+          if [[ "$version_without_build" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
           fi
           echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
@@ -113,10 +120,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.validate_release.outputs.tag }}
+          IS_PRERELEASE: ${{ needs.validate_release.outputs.prerelease }}
         run: |
           set -euo pipefail
           mapfile -d '' assets < <(find release-artifacts -type f \( -name '*.zip' -o -name '*.tar.gz' -o -name 'SHA256SUMS.txt' -o -name 'release-manifest.json' \) -print0 | sort -z)
+          release_options=()
+          if [ "$IS_PRERELEASE" = "true" ]; then
+            release_options+=(--prerelease)
+          fi
           gh release create "$RELEASE_TAG" "${assets[@]}" \
             --target "${{ needs.validate_release.outputs.source_sha }}" \
             --title "$RELEASE_TAG" \
+            "${release_options[@]}" \
             --generate-notes

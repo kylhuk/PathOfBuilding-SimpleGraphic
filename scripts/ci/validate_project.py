@@ -79,6 +79,19 @@ def main() -> int:
             or "ConfigureLuaScriptSearchPath(L, scriptWorkDir);" not in ui_main
         ):
             raise RuntimeError("the selected script directory is not in Lua package.path")
+        ui_api = require(ROOT / "ui_api.cpp")
+        launch_subscript_start = ui_api.find("SG_LUA_CPP_FUN_BEGIN(LaunchSubScript)")
+        launch_subscript_end = ui_api.find("SG_LUA_CPP_FUN_END()", launch_subscript_start)
+        launch_subscript = ui_api[launch_subscript_start:launch_subscript_end]
+        if (
+            launch_subscript_start < 0
+            or launch_subscript_end < 0
+            or "const std::string error = subScript->StartError();" not in launch_subscript
+            or 'ui->LExpect(L, false, "LaunchSubScript(): %s", error.c_str());' not in launch_subscript
+            or "luaL_error" in launch_subscript
+            or "ui->LAssert" in launch_subscript
+        ):
+            raise RuntimeError("LaunchSubScript can bypass C++ cleanup before reporting a Lua error")
         subscript = require(ROOT / "ui_subscript.cpp")
         if (
             "static void ssWipeCalls(ssCall_s* calls)" not in subscript
@@ -234,6 +247,15 @@ def main() -> int:
                 raise RuntimeError(f"LuaJIT registry baseline {baseline_name} points to the wrong port revision")
         if "workflow_dispatch:" not in release or "release:" in release.split("on:", 1)[1].split("permissions:", 1)[0]:
             raise RuntimeError("release workflow must be manual-only")
+        if (
+            "prerelease: ${{ steps.release_request.outputs.prerelease }}" not in release
+            or 'version_without_build="${RELEASE_VERSION%%+*}"' not in release
+            or 'if [[ "$version_without_build" == *-* ]]; then' not in release
+            or "IS_PRERELEASE: ${{ needs.validate_release.outputs.prerelease }}" not in release
+            or "release_options+=(--prerelease)" not in release
+            or '"${release_options[@]}"' not in release
+        ):
+            raise RuntimeError("release workflow does not mark SemVer prereleases as GitHub prereleases")
         if (ROOT / ".github/workflows/main.yml").exists():
             raise RuntimeError("legacy automatic release workflow remains")
         if "lukka/run-vcpkg" in "\n".join(
