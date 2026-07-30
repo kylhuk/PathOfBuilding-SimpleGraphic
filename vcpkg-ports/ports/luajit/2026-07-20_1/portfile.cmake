@@ -113,10 +113,14 @@ file(REMOVE
 )
 vcpkg_copy_tools(TOOL_NAMES luajit AUTO_CLEAN)
 
-# vcpkg_copy_tools stages the executable but not LuaJIT's Lua-side JIT
-# modules.  Keep them next to the staged host tool so it remains functional
-# after the package's build-time share directory is discarded.
-file(COPY "${SOURCE_PATH}/src/jit/" DESTINATION "${CURRENT_PACKAGES_DIR}/tools/luajit/jit")
+# The Windows launcher resolves LuaJIT scripts relative to the tool.  Copy
+# the built tree so generated vmdef.lua matches the staged executable.
+if(VCPKG_TARGET_IS_WINDOWS)
+    file(COPY
+        "${CURRENT_BUILDTREES_DIR}/${TARGET_TRIPLET}-rel/src/jit"
+        DESTINATION "${CURRENT_PACKAGES_DIR}/tools/luajit/lua"
+    )
+endif()
 
 vcpkg_fixup_pkgconfig()
 
