@@ -44,9 +44,19 @@ def main() -> int:
             raise RuntimeError("GLI is not patched for the current GLM make_vec4 API")
         if "#include <fmt/format.h>" not in require(ROOT / "engine/core/core_config.cpp"):
             raise RuntimeError("core config does not include fmt's formatting API")
+        common = require(ROOT / "engine/common/common.cpp")
+        if "VFormatString" not in common or "vasprintf" in common:
+            raise RuntimeError("shared printf formatting is not portable")
+        if any("vasprintf" in require(path) for path in (
+            ROOT / "engine/common/console.cpp",
+            ROOT / "engine/system/win/sys_main.cpp",
+        )):
+            raise RuntimeError("GNU-only vasprintf remains in a portable source path")
         system_main = require(ROOT / "engine/system/win/sys_main.cpp")
         if system_main.count("std::nullopt, std::string{") != 2:
             raise RuntimeError("user-path errors do not use portable optional construction")
+        if 'Error("%s", threadError);' not in system_main:
+            raise RuntimeError("thread errors are passed as an unsafe format string")
         if "sys->Sleep(1);" not in require(ROOT / "engine/render/r_main.cpp"):
             raise RuntimeError("renderer does not use the platform-neutral sleep API")
         # LuaSocket intentionally has both socket.core and mime.core. Their

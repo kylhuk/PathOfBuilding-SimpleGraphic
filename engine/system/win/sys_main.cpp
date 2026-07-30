@@ -609,18 +609,9 @@ void sys_main_c::Error(const char *fmt, ...)
 
 	va_list va;
 	va_start(va, fmt);
-#ifdef _WIN32
-	char msg[4096];
-	vsprintf_s(msg, 4096, fmt, va);
-#else
-	char* msg{};
-	vasprintf(&msg, fmt, va);
-#endif
+	std::string msg = VFormatString(fmt, va);
 	va_end(va);
-	con->Printf("\n--- ERROR ---\n%s", msg);
-#ifndef _WIN32
-	free(msg);
-#endif
+	con->Printf("\n--- ERROR ---\n%s", msg.c_str());
 
 	exitFlag = false;
 	while (exitFlag == false) {
@@ -824,7 +815,7 @@ bool sys_main_c::Run(int argc, char** argv)
 			core->Frame();
 
 			if (threadError) {
-				Error(threadError);
+				Error("%s", threadError);
 			}
 		}
 

@@ -6,6 +6,10 @@
 
 #include "common.h"
 
+#include <limits>
+#include <new>
+#include <stdexcept>
+
 // ===================
 // Argument List Class
 // ===================
@@ -280,7 +284,7 @@ std::u32string_view ReadColorEscape(std::u32string_view str, col3_t out)
 		break;
 	case 8:
 		{
-			int xr, xg, xb;
+			unsigned int xr{}, xg{}, xb{};
 			char buf[7]{};
 			for (size_t i = 0; i < 6; ++i) {
 				buf[i] = (char)str[i + 2];
@@ -328,6 +332,37 @@ char* _AllocStringLen(size_t len, const char* file, int line)
 void FreeString(const char* str)
 {
 	if (str) delete[] str;
+}
+
+std::string VFormatString(const char* fmt, va_list args)
+{
+	if (!fmt) {
+		return {};
+	}
+
+	va_list countArgs;
+	va_copy(countArgs, args);
+	int const count = vsnprintf(nullptr, 0, fmt, countArgs);
+	va_end(countArgs);
+	if (count < 0 || count == std::numeric_limits<int>::max()) {
+		return {};
+	}
+
+	try {
+		std::vector<char> text(static_cast<size_t>(count) + 1);
+		va_list outputArgs;
+		va_copy(outputArgs, args);
+		int const written = vsnprintf(text.data(), text.size(), fmt, outputArgs);
+		va_end(outputArgs);
+		if (written != count) {
+			return {};
+		}
+		return std::string(text.data(), static_cast<size_t>(written));
+	} catch (std::bad_alloc const&) {
+		return {};
+	} catch (std::length_error const&) {
+		return {};
+	}
 }
 
 dword StringHash(const char* str, int mask)

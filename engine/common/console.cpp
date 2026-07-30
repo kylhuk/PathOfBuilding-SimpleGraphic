@@ -337,18 +337,9 @@ void console_c::Warning(const char* fmt, ...)
 	// Print warning text
 	va_list va;
 	va_start(va, fmt);
-#ifdef _WIN32
-	char text[4096];
-	vsprintf_s(text, 4096, fmt, va);
-#else
-	char* text{};
-	vasprintf(&text, fmt, va);
-#endif
+	std::string text = VFormatString(fmt, va);
 	va_end(va);
-	Printf("^4Warning: %s\n", text);
-#ifndef _WIN32
-	free(text);
-#endif
+	Printf("^4Warning: %s\n", text.c_str());
 }
 
 void console_c::Clear()
@@ -662,19 +653,9 @@ void console_c::Executef(const char* fmt, ...)
 {
 	va_list va;
 	va_start(va, fmt);
-#ifdef _WIN32
-	char cmd[4096];
-	vsnprintf_s(cmd, 4095, fmt, va);
-	cmd[4095] = 0;
-#else
-	char* cmd{};
-	vasprintf(&cmd, fmt, va);
-#endif
+	std::string cmd = VFormatString(fmt, va);
 	va_end(va);
-	Execute(cmd);
-#ifndef _WIN32
-	free(cmd);
-#endif
+	Execute(cmd.c_str());
 }
 
 void console_c::ExecCommands(bool deferUnknown)
