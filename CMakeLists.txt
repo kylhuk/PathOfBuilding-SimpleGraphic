@@ -21,16 +21,37 @@ if (NOT DEFINED VCPKG_OVERLAY_TRIPLETS)
     set(VCPKG_OVERLAY_TRIPLETS "${CMAKE_CURRENT_LIST_DIR}/vcpkg-triplets"
         CACHE PATH "Additional vcpkg triplet directories")
 endif ()
+
+# CMake initializes CMAKE_HOST_SYSTEM_PROCESSOR while processing project().
+# This file chooses its vcpkg triplet before then, so discover the effective
+# target architecture without relying on that later-populated variable.
+set(_SIMPLEGRAPHIC_TARGET_ARCHITECTURE "")
+if (APPLE AND DEFINED CMAKE_OSX_ARCHITECTURES AND NOT CMAKE_OSX_ARCHITECTURES STREQUAL "")
+    set(_SIMPLEGRAPHIC_TARGET_ARCHITECTURE "${CMAKE_OSX_ARCHITECTURES}")
+elseif (APPLE AND DEFINED CMAKE_APPLE_SILICON_PROCESSOR AND NOT CMAKE_APPLE_SILICON_PROCESSOR STREQUAL "")
+    # This is the supported CMake override for a process running under Rosetta.
+    set(_SIMPLEGRAPHIC_TARGET_ARCHITECTURE "${CMAKE_APPLE_SILICON_PROCESSOR}")
+elseif (DEFINED CMAKE_SYSTEM_PROCESSOR AND NOT CMAKE_SYSTEM_PROCESSOR STREQUAL "")
+    set(_SIMPLEGRAPHIC_TARGET_ARCHITECTURE "${CMAKE_SYSTEM_PROCESSOR}")
+elseif (UNIX)
+    execute_process(
+        COMMAND uname -m
+        OUTPUT_VARIABLE _SIMPLEGRAPHIC_TARGET_ARCHITECTURE
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+endif ()
+
 if (UNIX AND NOT DEFINED VCPKG_TARGET_TRIPLET)
     if (APPLE)
-        if (CMAKE_OSX_ARCHITECTURES MATCHES "arm64" OR CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
+        if (_SIMPLEGRAPHIC_TARGET_ARCHITECTURE MATCHES "(^|;)(arm64|aarch64)(;|$)")
             set(_SIMPLEGRAPHIC_UNIX_TRIPLET arm64-osx-dynamic)
         else ()
             set(_SIMPLEGRAPHIC_UNIX_TRIPLET x64-osx-dynamic)
         endif ()
-    elseif (CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "^(i[3-6]86|x86)$")
+    elseif (_SIMPLEGRAPHIC_TARGET_ARCHITECTURE MATCHES "^(i[3-6]86|x86)$")
         set(_SIMPLEGRAPHIC_UNIX_TRIPLET x86-linux-dynamic)
-    elseif (CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
+    elseif (_SIMPLEGRAPHIC_TARGET_ARCHITECTURE MATCHES "^(arm64|aarch64)$")
         set(_SIMPLEGRAPHIC_UNIX_TRIPLET arm64-linux-dynamic)
     else ()
         set(_SIMPLEGRAPHIC_UNIX_TRIPLET x64-linux-dynamic)
@@ -43,7 +64,7 @@ endif ()
 # system baselines as the shipped presets.  Presets and CI pass this cache
 # entry explicitly; this default closes the gap for a fresh `cmake -S -B`.
 if (APPLE AND NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET)
-    if (CMAKE_OSX_ARCHITECTURES MATCHES "(^|;)arm64(;|$)" OR CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
+    if (_SIMPLEGRAPHIC_TARGET_ARCHITECTURE MATCHES "(^|;)(arm64|aarch64)(;|$)")
         set(_SIMPLEGRAPHIC_MACOS_DEPLOYMENT_TARGET "11.0")
     else ()
         set(_SIMPLEGRAPHIC_MACOS_DEPLOYMENT_TARGET "10.15")
@@ -52,6 +73,7 @@ if (APPLE AND NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET)
         CACHE STRING "Minimum macOS version supported by this build")
     unset(_SIMPLEGRAPHIC_MACOS_DEPLOYMENT_TARGET)
 endif ()
+unset(_SIMPLEGRAPHIC_TARGET_ARCHITECTURE)
 
 project(PathOfBuildingSimpleGraphic VERSION 2.6.0 LANGUAGES C CXX)
 

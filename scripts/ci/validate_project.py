@@ -24,6 +24,7 @@ def main() -> int:
         presets = json.loads(require(ROOT / "CMakePresets.json"))
         configuration = json.loads(require(ROOT / "vcpkg-configuration.json"))
         build_runtime = require(ROOT / ".github/workflows/build-runtime.yml")
+        runtime_verifier = require(ROOT / "scripts/ci/verify_runtime.py")
         require(ROOT / ".github/workflows/dev-build.yml")
         release = require(ROOT / ".github/workflows/release.yml")
         validate = require(ROOT / ".github/workflows/validate.yml")
@@ -153,6 +154,12 @@ def main() -> int:
             or "--macos-deployment-target" not in build_runtime
         ):
             raise RuntimeError("macOS deployment target is not propagated through CI")
+        if (
+            "def staged_native_binaries" not in runtime_verifier
+            or "*staged_native_binaries(runtime, args.platform)" not in runtime_verifier
+            or "exceeding the macOS" not in runtime_verifier
+        ):
+            raise RuntimeError("runtime verification does not inspect the staged dependency closure")
         luajit_port = require(luajit_current / "portfile.cmake")
         if (
             "MACOSX_DEPLOYMENT_TARGET=" not in luajit_port
@@ -231,8 +238,17 @@ def main() -> int:
             triplet_file = require(ROOT / "vcpkg-triplets" / f"{triplet}.cmake")
             if f'set(VCPKG_OSX_DEPLOYMENT_TARGET "{deployment_target}")' not in triplet_file:
                 raise RuntimeError(f"{triplet} does not propagate its macOS deployment target to vcpkg")
-        if cmake.index("CMAKE_OSX_DEPLOYMENT_TARGET") > cmake.index("project("):
+        project_index = cmake.index("project(PathOfBuildingSimpleGraphic")
+        if cmake.index("CMAKE_OSX_DEPLOYMENT_TARGET") > project_index:
             raise RuntimeError("CMake's direct macOS deployment-target default is set too late")
+        preproject_cmake = cmake[:project_index]
+        if (
+            "CMAKE_HOST_SYSTEM_PROCESSOR MATCHES" in preproject_cmake
+            or "CMAKE_APPLE_SILICON_PROCESSOR" not in preproject_cmake
+            or "execute_process(" not in preproject_cmake
+            or "COMMAND uname -m" not in preproject_cmake
+        ):
+            raise RuntimeError("CMake does not determine native macOS architecture before project()")
         print("source, presets, package staging, and manual-release contract are valid")
         return 0
     except (KeyError, RuntimeError, json.JSONDecodeError) as error:

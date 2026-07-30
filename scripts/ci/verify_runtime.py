@@ -26,6 +26,20 @@ def require_file(path: Path) -> None:
         raise RuntimeError(f"required runtime file is missing: {path}")
 
 
+def staged_native_binaries(runtime: Path, platform: str) -> list[Path]:
+    def native_binary(path: Path) -> bool:
+        if not path.is_file():
+            return False
+        name = path.name.lower()
+        if platform == "windows":
+            return name.endswith(".dll")
+        if platform == "macos":
+            return name.endswith(".dylib") or ".so" in name
+        return ".so" in name
+
+    return sorted(path for path in runtime.rglob("*") if native_binary(path))
+
+
 def macos_loader_paths(path: Path) -> tuple[list[str], list[str]]:
     dependencies = subprocess.run(
         ["otool", "-L", str(path)], text=True, capture_output=True, check=False
@@ -93,9 +107,9 @@ def check_macos_deployment_target(files: list[Path], expected: str | None) -> No
     expected_parts = normalized_version(expected)
     for path in files:
         actual = macos_minimum_version(path)
-        if normalized_version(actual) != expected_parts:
+        if normalized_version(actual) > expected_parts:
             raise RuntimeError(
-                f"{path} targets macOS {actual}, expected macOS {expected}"
+                f"{path} requires macOS {actual}, exceeding the macOS {expected} package baseline"
             )
 
 
@@ -206,7 +220,16 @@ def main() -> int:
     for path in [host, simplegraphic, *module_paths, *lua_paths]:
         require_file(path)
 
-    runtime_files = [host, simplegraphic, *module_paths]
+    # CMake stages the complete vcpkg runtime closure alongside the known
+    # host/modules. Validate every dynamic binary, not just the ones this
+    # script already knows by name, so a dependency cannot quietly require a
+    # newer macOS release or a build-machine loader path.
+    runtime_files = list(dict.fromkeys([
+        host,
+        simplegraphic,
+        *module_paths,
+        *staged_native_binaries(runtime, args.platform),
+    ]))
     if args.platform == "windows":
         verify_runtime(
             host,
