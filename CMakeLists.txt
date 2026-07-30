@@ -429,6 +429,16 @@ endif ()
 set(SIMPLEGRAPHIC_LUA_ROOT_MODULE_TARGETS lcurl lua_utf8 lzip)
 set(SIMPLEGRAPHIC_LUA_LCURL_MODULE_TARGETS lcurl_safe)
 set(SIMPLEGRAPHIC_RUNTIME_TARGETS SimpleGraphic)
+set(SIMPLEGRAPHIC_RUNTIME_DEPENDENCY_ARGUMENTS)
+# CMake's recursive dependency scanner follows Windows system/API-set DLLs
+# into runner-specific internals. Windows packages instead stage the release
+# vcpkg bin directory below, which contains the application-local dependency
+# closure. Unix and macOS retain CMake's precise loader scan.
+if (NOT WIN32)
+    list(APPEND SIMPLEGRAPHIC_RUNTIME_DEPENDENCY_ARGUMENTS
+        RUNTIME_DEPENDENCY_SET simplegraphic_runtime_dependencies
+    )
+endif ()
 if (SIMPLEGRAPHIC_BUILD_HOST)
     list(APPEND SIMPLEGRAPHIC_RUNTIME_TARGETS SimpleGraphicHost)
 endif ()
@@ -482,38 +492,38 @@ if (APPLE)
 endif ()
 
 install(TARGETS ${SIMPLEGRAPHIC_RUNTIME_TARGETS}
-    RUNTIME_DEPENDENCY_SET simplegraphic_runtime_dependencies
+    ${SIMPLEGRAPHIC_RUNTIME_DEPENDENCY_ARGUMENTS}
     RUNTIME DESTINATION "."
     LIBRARY DESTINATION "."
     ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
 )
 install(TARGETS ${SIMPLEGRAPHIC_LUA_ROOT_MODULE_TARGETS}
-    RUNTIME_DEPENDENCY_SET simplegraphic_runtime_dependencies
+    ${SIMPLEGRAPHIC_RUNTIME_DEPENDENCY_ARGUMENTS}
     RUNTIME DESTINATION "lua"
     LIBRARY DESTINATION "lua"
     ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
 )
 install(TARGETS ${SIMPLEGRAPHIC_LUA_LCURL_MODULE_TARGETS}
-    RUNTIME_DEPENDENCY_SET simplegraphic_runtime_dependencies
+    ${SIMPLEGRAPHIC_RUNTIME_DEPENDENCY_ARGUMENTS}
     RUNTIME DESTINATION "lua/lcurl"
     LIBRARY DESTINATION "lua/lcurl"
     ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
 )
 install(TARGETS luasocket
-    RUNTIME_DEPENDENCY_SET simplegraphic_runtime_dependencies
+    ${SIMPLEGRAPHIC_RUNTIME_DEPENDENCY_ARGUMENTS}
     RUNTIME DESTINATION "lua/socket"
     LIBRARY DESTINATION "lua/socket"
     ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
 )
 install(TARGETS luasocket_mime
-    RUNTIME_DEPENDENCY_SET simplegraphic_runtime_dependencies
+    ${SIMPLEGRAPHIC_RUNTIME_DEPENDENCY_ARGUMENTS}
     RUNTIME DESTINATION "lua/mime"
     LIBRARY DESTINATION "lua/mime"
     ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
 )
 if (TARGET luasocket_unix)
     install(TARGETS luasocket_unix
-        RUNTIME_DEPENDENCY_SET simplegraphic_runtime_dependencies
+        ${SIMPLEGRAPHIC_RUNTIME_DEPENDENCY_ARGUMENTS}
         RUNTIME DESTINATION "lua/socket"
         LIBRARY DESTINATION "lua/socket"
         ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}"
@@ -554,24 +564,34 @@ if (DEFINED VCPKG_INSTALLED_DIR AND DEFINED VCPKG_TARGET_TRIPLET)
         "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/debug/lib"
     )
 endif ()
-if (WIN32 AND DEFINED VCPKG_INSTALLED_DIR AND DEFINED VCPKG_TARGET_TRIPLET)
-    # Visual Studio copies this one dependency beside every Lua module. CMake
-    # then sees several equally named candidates while collecting runtime
-    # dependencies. Stage the canonical vcpkg DLL once instead.
-    list(APPEND SIMPLEGRAPHIC_RUNTIME_PRE_EXCLUDE_REGEXES "^lua51\\.dll$")
-    install(FILES "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/bin/lua51.dll" DESTINATION ".")
+if (WIN32)
+    if (DEFINED VCPKG_INSTALLED_DIR AND DEFINED VCPKG_TARGET_TRIPLET)
+        # Stage every release vcpkg DLL application-locally. This avoids
+        # recursively resolving Windows API-set and runner-specific system
+        # DLLs while preserving the complete dependency closure needed by the
+        # host and Lua extension modules.
+        install(DIRECTORY "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/bin/"
+            DESTINATION "."
+            FILES_MATCHING PATTERN "*.dll"
+        )
+    endif ()
+else ()
+    # LIBRARY and RUNTIME terminate the final list-valued filter. CMake omits
+    # filters placed after an artifact-kind group, while a bare DESTINATION
+    # makes the final regex become the output path.
+    install(RUNTIME_DEPENDENCY_SET simplegraphic_runtime_dependencies
+        DIRECTORIES ${SIMPLEGRAPHIC_RUNTIME_SEARCH_DIRS}
+        PRE_EXCLUDE_REGEXES ${SIMPLEGRAPHIC_RUNTIME_PRE_EXCLUDE_REGEXES}
+        POST_EXCLUDE_REGEXES
+            "^/System/Library/.*"
+            "^/usr/lib/.*"
+            "^/lib/.*"
+            ".*/ld-linux[^/]*\\.so.*"
+            ".*/lib(c|m|dl|pthread|rt|stdc\\+\\+|gcc_s)\\.so.*"
+        LIBRARY DESTINATION "."
+        RUNTIME DESTINATION "."
+    )
 endif ()
-install(RUNTIME_DEPENDENCY_SET simplegraphic_runtime_dependencies
-    DESTINATION "."
-    DIRECTORIES ${SIMPLEGRAPHIC_RUNTIME_SEARCH_DIRS}
-    PRE_EXCLUDE_REGEXES ${SIMPLEGRAPHIC_RUNTIME_PRE_EXCLUDE_REGEXES}
-    POST_EXCLUDE_REGEXES
-        "^/System/Library/.*"
-        "^/usr/lib/.*"
-        "^/lib/.*"
-        ".*/ld-linux[^/]*\\.so.*"
-        ".*/lib(c|m|dl|pthread|rt|stdc\\+\\+|gcc_s)\\.so.*"
-)
 install(FILES README.md LICENSE DESTINATION ".")
 
 if (BUILD_TESTING AND SIMPLEGRAPHIC_BUILD_TESTS AND SIMPLEGRAPHIC_BUILD_HOST)

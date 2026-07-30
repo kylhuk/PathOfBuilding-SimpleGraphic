@@ -36,8 +36,8 @@ def main() -> int:
             raise RuntimeError("vcpkg dynamic triplet overlay is not configured")
         if "RUNTIME_DEPENDENCY_SET simplegraphic_runtime_dependencies" not in cmake:
             raise RuntimeError("CMake does not stage transitive runtime dependencies")
-        if '"^lua51\\\\.dll$"' not in cmake or 'bin/lua51.dll" DESTINATION "."' not in cmake:
-            raise RuntimeError("Windows LuaJIT runtime is not staged without duplicate dependency resolution")
+        if "SIMPLEGRAPHIC_RUNTIME_DEPENDENCY_ARGUMENTS" not in cmake:
+            raise RuntimeError("platform runtime dependency staging is not configured")
         if "if (UNIX AND NOT APPLE)\n    target_compile_definitions(SimpleGraphic PRIVATE _POSIX_C_SOURCE=200809L)" not in cmake:
             raise RuntimeError("Darwin must not receive Linux POSIX feature macros")
         if "MACOSX_RPATH ON" not in cmake or 'INSTALL_NAME_DIR "@rpath"' not in cmake:
@@ -73,6 +73,21 @@ def main() -> int:
                 raise RuntimeError("LuaSocket core modules do not have distinct build output directories")
         if "runtime_smoke.cpp" not in cmake or "SimpleGraphicRuntimeSmoke" not in require(ROOT / "runtime_smoke.cpp") or "--smoke-modules" not in require(ROOT / "launcher/main.cpp"):
             raise RuntimeError("staged runtime smoke coverage is missing")
+        runtime_dependency_start = cmake.index(
+            "install(RUNTIME_DEPENDENCY_SET simplegraphic_runtime_dependencies"
+        )
+        runtime_dependency_end = cmake.index(
+            "install(FILES README.md LICENSE", runtime_dependency_start
+        )
+        runtime_dependency_install = cmake[runtime_dependency_start:runtime_dependency_end]
+        if 'LIBRARY DESTINATION "."' not in runtime_dependency_install or 'RUNTIME DESTINATION "."' not in runtime_dependency_install:
+            raise RuntimeError("runtime dependency install must declare library and runtime destinations")
+        if runtime_dependency_install.index('LIBRARY DESTINATION "."') < runtime_dependency_install.index("POST_EXCLUDE_REGEXES"):
+            raise RuntimeError("runtime dependency filters must precede artifact destinations")
+        if 'install(DIRECTORY "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/bin/"' not in cmake:
+            raise RuntimeError("Windows runtime does not stage the vcpkg DLL closure")
+        if build_runtime.count("if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }") < 6:
+            raise RuntimeError("Windows native command failures are not propagated")
         luajit_configure = require(ROOT / "vcpkg-ports/ports/luajit/2026-07-20_1/configure")
         if "'LJ_TARGET_ARM 1'" not in luajit_configure or "'LJ_TARGET_X86 1'" not in luajit_configure:
             raise RuntimeError("LuaJIT's 32-bit manual buildvm architecture tokens are incomplete")

@@ -85,7 +85,9 @@ jobs:
       - name: Bootstrap vcpkg
         shell: pwsh
         if: matrix.family == 'windows'
-        run: .\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+        run: |
+          .\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build, test, stage, and package
         shell: pwsh
@@ -93,6 +95,7 @@ jobs:
         env:
           VCPKG_DISABLE_METRICS: '1'
         run: |
+          $ErrorActionPreference = 'Stop'
           $build = "$env:GITHUB_WORKSPACE/out/build/${{ matrix.id }}"
           $stage = "$env:GITHUB_WORKSPACE/out/stage/${{ matrix.id }}"
           $archive = "$env:GITHUB_WORKSPACE/out/artifacts/PathOfBuilding-SimpleGraphic-${{ matrix.id }}.zip"
@@ -101,11 +104,17 @@ jobs:
             -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} `
             "-DVCPKG_OVERLAY_TRIPLETS=$env:GITHUB_WORKSPACE/vcpkg-triplets" `
             -DSIMPLEGRAPHIC_BUILD_TESTS=ON
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmake --build $build --config Release --parallel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ctest --test-dir $build -C Release --output-on-failure
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmake --install $build --config Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python scripts/ci/verify_runtime.py --runtime $stage --platform windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python scripts/ci/package_runtime.py --runtime $stage --output $archive --format zip --name "PathOfBuilding-SimpleGraphic-${{ matrix.id }}"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Bootstrap vcpkg
         shell: bash
