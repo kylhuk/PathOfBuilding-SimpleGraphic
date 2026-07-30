@@ -543,6 +543,9 @@ install(FILES
 )
 
 set(SIMPLEGRAPHIC_RUNTIME_SEARCH_DIRS)
+set(SIMPLEGRAPHIC_RUNTIME_PRE_EXCLUDE_REGEXES
+    "^(api-ms-win|ext-ms-win)-.*"
+)
 if (DEFINED VCPKG_INSTALLED_DIR AND DEFINED VCPKG_TARGET_TRIPLET)
     list(APPEND SIMPLEGRAPHIC_RUNTIME_SEARCH_DIRS
         "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/bin"
@@ -551,11 +554,17 @@ if (DEFINED VCPKG_INSTALLED_DIR AND DEFINED VCPKG_TARGET_TRIPLET)
         "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/debug/lib"
     )
 endif ()
+if (WIN32 AND DEFINED VCPKG_INSTALLED_DIR AND DEFINED VCPKG_TARGET_TRIPLET)
+    # Visual Studio copies this one dependency beside every Lua module. CMake
+    # then sees several equally named candidates while collecting runtime
+    # dependencies. Stage the canonical vcpkg DLL once instead.
+    list(APPEND SIMPLEGRAPHIC_RUNTIME_PRE_EXCLUDE_REGEXES "^lua51\\.dll$")
+    install(FILES "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/bin/lua51.dll" DESTINATION ".")
+endif ()
 install(RUNTIME_DEPENDENCY_SET simplegraphic_runtime_dependencies
     DESTINATION "."
     DIRECTORIES ${SIMPLEGRAPHIC_RUNTIME_SEARCH_DIRS}
-    PRE_EXCLUDE_REGEXES
-        "^(api-ms-win|ext-ms-win)-.*"
+    PRE_EXCLUDE_REGEXES ${SIMPLEGRAPHIC_RUNTIME_PRE_EXCLUDE_REGEXES}
     POST_EXCLUDE_REGEXES
         "^/System/Library/.*"
         "^/usr/lib/.*"

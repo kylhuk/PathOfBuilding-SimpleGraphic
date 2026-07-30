@@ -36,6 +36,8 @@ def main() -> int:
             raise RuntimeError("vcpkg dynamic triplet overlay is not configured")
         if "RUNTIME_DEPENDENCY_SET simplegraphic_runtime_dependencies" not in cmake:
             raise RuntimeError("CMake does not stage transitive runtime dependencies")
+        if '"^lua51\\\\.dll$"' not in cmake or 'bin/lua51.dll" DESTINATION "."' not in cmake:
+            raise RuntimeError("Windows LuaJIT runtime is not staged without duplicate dependency resolution")
         if "if (UNIX AND NOT APPLE)\n    target_compile_definitions(SimpleGraphic PRIVATE _POSIX_C_SOURCE=200809L)" not in cmake:
             raise RuntimeError("Darwin must not receive Linux POSIX feature macros")
         if "MACOSX_RPATH ON" not in cmake or 'INSTALL_NAME_DIR "@rpath"' not in cmake:
