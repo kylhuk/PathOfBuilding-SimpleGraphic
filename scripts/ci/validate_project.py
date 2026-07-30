@@ -24,6 +24,7 @@ def main() -> int:
         presets = json.loads(require(ROOT / "CMakePresets.json"))
         configuration = json.loads(require(ROOT / "vcpkg-configuration.json"))
         build_runtime = require(ROOT / ".github/workflows/build-runtime.yml")
+        readme = require(ROOT / "README.md")
         runtime_verifier = require(ROOT / "scripts/ci/verify_runtime.py")
         require(ROOT / ".github/workflows/dev-build.yml")
         release = require(ROOT / ".github/workflows/release.yml")
@@ -179,10 +180,38 @@ def main() -> int:
             raise RuntimeError("Windows native command failures are not propagated")
         if "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c" not in build_runtime or "gh run download" in build_runtime:
             raise RuntimeError("Windows 10 package smoke tests must use the pinned artifact downloader")
-        luajit_current = ROOT / "vcpkg-ports/ports/luajit/2026-07-20_2"
+        trusted_self_hosted_events = "(github.event_name == 'push' || github.event_name == 'workflow_dispatch')"
+        if (
+            "allow_self_hosted_smoke:" not in build_runtime
+            or "default: false\n        type: boolean" not in build_runtime
+            or build_runtime.count("inputs.allow_self_hosted_smoke &&") != 2
+            or build_runtime.count(trusted_self_hosted_events) != 2
+            or "vars.ENABLE_WINDOWS10_SMOKE == 'true'" not in build_runtime
+            or "vars.ENABLE_WINDOWS10_ARM64_SMOKE == 'true'" not in build_runtime
+            or "allow_self_hosted_smoke: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}" not in require(ROOT / ".github/workflows/dev-build.yml")
+            or "allow_self_hosted_smoke: true" not in release
+        ):
+            raise RuntimeError("self-hosted Windows 10 smoke tests are not restricted to trusted callers")
+        luajit_current = ROOT / "vcpkg-ports/ports/luajit/2026-07-20_3"
         luajit_configure = require(luajit_current / "configure")
         if "'LJ_TARGET_ARM 1'" not in luajit_configure or "'LJ_TARGET_X86 1'" not in luajit_configure:
             raise RuntimeError("LuaJIT's 32-bit manual buildvm architecture tokens are incomplete")
+        luajit_wide_crt = require(luajit_current / "pob-wide-crt.patch")
+        ll_load_start = luajit_wide_crt.index("static void *ll_load")
+        ll_load_end = luajit_wide_crt.index("static int lj_cf_package_unloadlib", ll_load_start)
+        ll_load = luajit_wide_crt[ll_load_start:ll_load_end]
+        tmpnam_start = luajit_wide_crt.index("+char* _lua_tmpnam(char* s)")
+        tmpnam_end = luajit_wide_crt.index("+\n+#endif", tmpnam_start)
+        tmpnam = luajit_wide_crt[tmpnam_start:tmpnam_end]
+        if (
+            "+  HINSTANCE lib = NULL;" not in ll_load
+            or "+  if (_lua_widentobuffer(path, pathBuf, _countof(pathBuf))) {\n+    lib = LoadLibraryW(pathBuf);\n+  }" not in ll_load
+            or "  if (lib == NULL) pusherror(L);" not in ll_load
+            or "+  HINSTANCE lib = LoadLibraryW(pathBuf);" in ll_load
+            or "+  if (_wtmpnam(tmpBuf) == NULL) {\n+    return NULL;\n+  }" not in tmpnam
+            or tmpnam.index("_wtmpnam(tmpBuf)") > tmpnam.index("_lua_narrowtobuffer")
+        ):
+            raise RuntimeError("LuaJIT's Windows UTF-8 loader and temporary-name error paths are unsafe")
         if '"-DCMAKE_INSTALL_PREFIX=$stage"' not in build_runtime:
             raise RuntimeError("Windows runtime staging does not expand its CMake install prefix")
         try:
@@ -195,6 +224,40 @@ def main() -> int:
             raise RuntimeError("Linux x86 does not provision its pinned binary CMake")
         if 'grep -q "Class:.*ELF32"' not in x86_container_script:
             raise RuntimeError("Linux x86 build does not assert a 32-bit staged payload")
+        linux_native_step = build_runtime.find("Build Linux runtime in the Debian 12 compatibility container")
+        linux_native_step_end = build_runtime.find(
+            "\n      - name: Build, test, stage, and package macOS runtime", linux_native_step
+        )
+        linux_native_script_start = build_runtime.find("bash -lc '\n", linux_native_step)
+        linux_native_script_end = build_runtime.find("\n            '\n", linux_native_script_start)
+        linux_native_step_text = build_runtime[linux_native_step:linux_native_step_end]
+        linux_native_script = build_runtime[linux_native_script_start:linux_native_script_end]
+        if (
+            linux_native_step < 0
+            or linux_native_step_end < 0
+            or linux_native_script_start < 0
+            or linux_native_script_end < 0
+            or build_runtime.count("if: matrix.family == 'macos'") < 2
+            or "if: matrix.family != 'windows'" in build_runtime
+            or "debian:12" not in linux_native_step_text
+            or 'if [ "$(uname -m)" != "$SIMPLEGRAPHIC_LINUX_ARCHITECTURE" ]; then' not in linux_native_script
+            or "binutils build-essential" not in linux_native_script
+            or "pkg-config python3 python3-venv" not in linux_native_script
+            or "--only-binary=:all: cmake==3.31.1" not in linux_native_script
+            or "git config --global --add safe.directory /src" not in linux_native_script
+            or "git config --global --add safe.directory /src/vcpkg" not in linux_native_script
+            or "build=/src/out/build/$SIMPLEGRAPHIC_LINUX_ID" not in linux_native_script
+            or "stage=/src/out/stage/$SIMPLEGRAPHIC_LINUX_ID" not in linux_native_script
+            or "archive=/src/out/artifacts/PathOfBuilding-SimpleGraphic-$SIMPLEGRAPHIC_LINUX_ID.tar.gz" not in linux_native_script
+        ):
+            raise RuntimeError("Linux x64/ARM64 builds do not enforce the Debian 12 compatibility baseline")
+        if (
+            "native Debian 12 containers" not in readme
+            or "(x86, x64, and ARM64)" not in readme
+            or "glibc 2.36" not in readme
+            or "GCC 12 libstdc++ ABI" not in readme
+        ):
+            raise RuntimeError("README does not document the Linux system-library compatibility baseline")
         if (
             "deployment_target: '10.15'" not in build_runtime
             or "deployment_target: '11.0'" not in build_runtime

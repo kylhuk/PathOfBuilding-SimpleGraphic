@@ -16,6 +16,11 @@ on:
         required: false
         default: 14
         type: number
+      allow_self_hosted_smoke:
+        description: Allow optional Windows 10 smoke tests on self-hosted runners.
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   actions: read
@@ -120,24 +125,95 @@ jobs:
 
       - name: Bootstrap vcpkg
         shell: bash
-        if: matrix.family != 'windows'
+        if: matrix.family == 'macos'
         run: ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
 
-      - name: Install Linux graphics build prerequisites
+      - name: Build Linux runtime in the Debian 12 compatibility container
         if: matrix.family == 'linux'
         shell: bash
+        env:
+          VCPKG_DISABLE_METRICS: '1'
+          SIMPLEGRAPHIC_LINUX_ID: ${{ matrix.id }}
+          SIMPLEGRAPHIC_LINUX_ARCHITECTURE: ${{ matrix.architecture }}
+          SIMPLEGRAPHIC_LINUX_TRIPLET: ${{ matrix.triplet }}
         run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libegl1-mesa-dev libgl1-mesa-dev \
-            libglu1-mesa-dev mesa-common-dev \
-            libxcursor-dev libxi-dev libxinerama-dev libxrandr-dev libx11-dev \
-            pkg-config xorg-dev
+          # The staged package deliberately relies on the system glibc and C++
+          # runtime. Build it in Debian 12, not the changing Ubuntu host, to
+          # keep the release ABI floor stable. No --platform is supplied:
+          # Docker pulls the matching native x64 or ARM64 image, verified below.
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/src" \
+            --workdir /src \
+            --env VCPKG_DISABLE_METRICS \
+            --env SIMPLEGRAPHIC_LINUX_ID \
+            --env SIMPLEGRAPHIC_LINUX_ARCHITECTURE \
+            --env SIMPLEGRAPHIC_LINUX_TRIPLET \
+            --env DEBIAN_FRONTEND=noninteractive \
+            debian:12 \
+            bash -lc '
+              set -euo pipefail
+              dump_vcpkg_failure_logs() {
+                failure_status=$?
+                if [ "$failure_status" -ne 0 ] && [ -d /src/vcpkg/buildtrees ]; then
+                  while IFS= read -r log; do
+                    [ -n "$log" ] || continue
+                    printf "::group::%s\\n" "$log"
+                    tail -n 240 "$log" || true
+                    echo "::endgroup::"
+                  done < <(
+                    find /src/vcpkg/buildtrees -type f \
+                      \( -name "*-out.log" -o -name "*-err.log" -o -name "*CMakeCache*.log" \) \
+                      -printf "%T@ %p\\n" |
+                      sort -nr |
+                      head -n 12 |
+                      cut -d " " -f2-
+                  )
+                fi
+                exit "$failure_status"
+              }
+              trap dump_vcpkg_failure_logs EXIT
+              if [ "$(uname -m)" != "$SIMPLEGRAPHIC_LINUX_ARCHITECTURE" ]; then
+                echo "Expected $SIMPLEGRAPHIC_LINUX_ARCHITECTURE Debian container, got $(uname -m)." >&2
+                exit 1
+              fi
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                binutils build-essential ca-certificates cmake curl git ninja-build \
+                libegl1-mesa-dev libgl1-mesa-dev libglu1-mesa-dev mesa-common-dev \
+                libxcursor-dev libxi-dev libxinerama-dev libxrandr-dev libx11-dev \
+                pkg-config python3 python3-venv tar unzip xorg-dev zip
+              python3 -m venv /opt/simplegraphic-cmake
+              /opt/simplegraphic-cmake/bin/python -m pip install \
+                --disable-pip-version-check --no-cache-dir --no-deps \
+                --only-binary=:all: cmake==3.31.1
+              export PATH=/opt/simplegraphic-cmake/bin:$PATH
+              cmake --version
+              git config --global --add safe.directory /src
+              git config --global --add safe.directory /src/vcpkg
+              ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
+              build=/src/out/build/$SIMPLEGRAPHIC_LINUX_ID
+              stage=/src/out/stage/$SIMPLEGRAPHIC_LINUX_ID
+              archive=/src/out/artifacts/PathOfBuilding-SimpleGraphic-$SIMPLEGRAPHIC_LINUX_ID.tar.gz
+              cmake -S . -B "$build" -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_INSTALL_PREFIX="$stage" \
+                -DVCPKG_TARGET_TRIPLET="$SIMPLEGRAPHIC_LINUX_TRIPLET" \
+                -DVCPKG_OVERLAY_TRIPLETS=/src/vcpkg-triplets \
+                -DSIMPLEGRAPHIC_BUILD_TESTS=ON
+              cmake --build "$build" --parallel
+              ctest --test-dir "$build" --output-on-failure
+              cmake --install "$build"
+              python3 scripts/ci/verify_runtime.py --runtime "$stage" --platform linux
+              python3 scripts/ci/package_runtime.py \
+                --runtime "$stage" \
+                --output "$archive" \
+                --format tar.gz \
+                --name PathOfBuilding-SimpleGraphic-$SIMPLEGRAPHIC_LINUX_ID
+            '
 
-      - name: Build, test, stage, and package
+      - name: Build, test, stage, and package macOS runtime
         shell: bash
-        if: matrix.family != 'windows'
+        if: matrix.family == 'macos'
         env:
           VCPKG_DISABLE_METRICS: '1'
         run: |
@@ -290,7 +366,10 @@ jobs:
     needs: native
     # GitHub-hosted runners do not provide Windows 10. Repositories that have
     # a Windows 10 self-hosted runner opt in with this repository variable.
-    if: vars.ENABLE_WINDOWS10_SMOKE == 'true'
+    # Do not run pull-request code on self-hosted infrastructure: the reusable
+    # workflow independently permits only trusted push or manual-dispatch
+    # callers, even if a pull request changes its caller workflow.
+    if: inputs.allow_self_hosted_smoke && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && vars.ENABLE_WINDOWS10_SMOKE == 'true'
     runs-on: [self-hosted, Windows, Windows-10, X64]
     strategy:
       fail-fast: false
@@ -327,7 +406,9 @@ jobs:
     needs: native
     # This separate opt-in permits repositories with an ARM64 Windows 10
     # runner to verify the same binary that is produced on Windows 11 ARM.
-    if: vars.ENABLE_WINDOWS10_ARM64_SMOKE == 'true'
+    # The event and input gate above is repeated here so this ARM64 runner is
+    # never scheduled for pull-request code either.
+    if: inputs.allow_self_hosted_smoke && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && vars.ENABLE_WINDOWS10_ARM64_SMOKE == 'true'
     runs-on: [self-hosted, Windows, Windows-10, ARM64]
     steps:
       - name: Download the ARM64 runtime artifact

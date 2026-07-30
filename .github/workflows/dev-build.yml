@@ -22,3 +22,7 @@ jobs:
       source_ref: ${{ github.sha }}
       artifact_prefix: dev-${{ github.sha }}
       retention_days: 14
+      # A pull request must never cause its code to run on a self-hosted
+      # runner. Pushes to master and manually dispatched development builds
+      # remain eligible when the repository opts in.
+      allow_self_hosted_smoke: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}

@@ -73,6 +73,10 @@ jobs:
       source_ref: ${{ needs.validate_release.outputs.source_sha }}
       artifact_prefix: release-${{ needs.validate_release.outputs.tag }}
       retention_days: 30
+      # Releases are manual-only and validate that source_ref is the current
+      # master tip, so their optional Windows 10 coverage may use the
+      # repository's self-hosted runners.
+      allow_self_hosted_smoke: true
 
   publish:
     name: Create GitHub release

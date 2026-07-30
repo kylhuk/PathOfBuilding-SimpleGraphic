@@ -32,6 +32,13 @@ pinned GitHub Actions download step, so they do not need the GitHub CLI.
 macOS Intel packages target macOS 10.15 and later; Apple-Silicon packages
 target macOS 11.0 and later.
 
+All shipped Linux archives (x86, x64, and ARM64) are built in native Debian 12
+containers. Because glibc, libstdc++, and libgcc are intentionally supplied by
+the target system rather than bundled, their minimum runtime baseline is Debian
+12: glibc 2.36 and the GCC 12 libstdc++ ABI. Deploy Linux archives on Debian
+12 or a distribution with compatible-or-newer versions of those system
+libraries.
+
 ## Building
 
 Initialize the checked-in dependency sources first:
@@ -80,6 +87,11 @@ Unix packages deliberately use the checked-in `*-dynamic` vcpkg triplets:
 this guarantees that the executable and every Lua extension share one dynamic
 LuaJIT runtime. Do not replace those triplets with static LuaJIT variants.
 
+For release-equivalent Linux output, use the Debian 12 container recipes in
+the build workflow. A local Linux preset is useful for development, but a
+newer host distribution can produce binaries that require newer system
+libraries than the published compatibility baseline.
+
 The `INSTALL` target creates a ready-to-package runtime directory. Its
 contents can be copied directly into an installer payload; no build directory
 or vcpkg installation is needed at runtime. Run this before packaging:
@@ -101,7 +113,8 @@ The repository uses four workflows:
   installer-ready artifacts for 14 days.
 - **Build runtime matrix** is the shared implementation for development and
   release builds. It builds Windows x86/x64/ARM64, macOS x64/ARM64, and Linux
-  x86/x64/ARM64, then runs the staged Lua-module smoke test.
+  x86/x64/ARM64 in native Debian 12 containers, then runs the staged
+  Lua-module smoke test.
 - **Publish release** has no automatic trigger. A maintainer manually enters a
   SemVer version; the workflow verifies that the selected revision is the
   current `master` tip, builds all eight packages, produces SHA-256 checksums,
