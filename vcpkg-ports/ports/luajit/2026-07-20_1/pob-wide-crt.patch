@@ -373,7 +373,7 @@ new file mode 100644
 index 00000000..72e9ccae
 --- /dev/null
 +++ b/src/lj_utf8win.h
-@@ -0,0 +1,28 @@
+@@ -0,0 +1,38 @@
 +#ifndef LJ_UTF8_WIN_H
 +#define LJ_UTF8_WIN_H
 +

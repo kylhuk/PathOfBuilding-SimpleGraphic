@@ -170,6 +170,9 @@ jobs:
           VCPKG_DISABLE_METRICS: '1'
         run: |
           set -euo pipefail
+          # Docker runs 32-bit userland on the x64 kernel, whose default
+          # uname result would make vcpkg bootstrap an incompatible x64 host
+          # tool. linux32 selects the matching process personality first.
           docker run --rm \
             --platform linux/386 \
             --volume "$GITHUB_WORKSPACE:/src" \
@@ -177,7 +180,7 @@ jobs:
             --env VCPKG_DISABLE_METRICS \
             --env DEBIAN_FRONTEND=noninteractive \
             debian:12 \
-            bash -lc '
+            linux32 bash -lc '
               set -euo pipefail
               apt-get update
               apt-get install -y --no-install-recommends \
