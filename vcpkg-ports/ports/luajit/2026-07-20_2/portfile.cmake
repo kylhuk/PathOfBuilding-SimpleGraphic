@@ -45,11 +45,16 @@ if(VCPKG_DETECTED_MSVC)
 else()
     vcpkg_list(SET options)
     if(VCPKG_TARGET_IS_OSX)
-        if(NOT DEFINED VCPKG_OSX_DEPLOYMENT_TARGET OR VCPKG_OSX_DEPLOYMENT_TARGET STREQUAL "")
-            message(FATAL_ERROR "LuaJIT requires VCPKG_OSX_DEPLOYMENT_TARGET for a Darwin build")
+        # vcpkg_cmake_get_vars() exposes the selected target's CMake settings,
+        # but custom triplet-only variables are not guaranteed to survive in
+        # the portfile scope. CMake, presets, and CI all export the effective
+        # deployment target before vcpkg starts, so use that inherited value
+        # for LuaJIT's Make-based configure wrapper.
+        if("$ENV{MACOSX_DEPLOYMENT_TARGET}" STREQUAL "")
+            message(FATAL_ERROR "LuaJIT requires MACOSX_DEPLOYMENT_TARGET for a Darwin build")
         endif()
         vcpkg_list(APPEND options
-            "MACOSX_DEPLOYMENT_TARGET=${VCPKG_OSX_DEPLOYMENT_TARGET}"
+            "MACOSX_DEPLOYMENT_TARGET=$ENV{MACOSX_DEPLOYMENT_TARGET}"
         )
     endif()
     if(VCPKG_CROSSCOMPILING)

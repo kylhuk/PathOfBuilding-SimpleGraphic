@@ -163,9 +163,12 @@ def main() -> int:
         luajit_port = require(luajit_current / "portfile.cmake")
         if (
             "MACOSX_DEPLOYMENT_TARGET=" not in luajit_port
-            or "VCPKG_OSX_DEPLOYMENT_TARGET for a Darwin build" not in luajit_port
+            or "$ENV{MACOSX_DEPLOYMENT_TARGET}" not in luajit_port
+            or "MACOSX_DEPLOYMENT_TARGET for a Darwin build" not in luajit_port
         ):
             raise RuntimeError("LuaJIT does not receive the macOS deployment target")
+        if 'set(ENV{MACOSX_DEPLOYMENT_TARGET} "${CMAKE_OSX_DEPLOYMENT_TARGET}")' not in cmake:
+            raise RuntimeError("CMake does not export its effective macOS deployment target before loading vcpkg")
         luajit_makefile = require(luajit_current / "configure")
         if (
             "LUAJIT_MACOSX_DEPLOYMENT_TARGET" not in luajit_makefile

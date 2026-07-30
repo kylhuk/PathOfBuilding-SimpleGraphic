@@ -73,6 +73,15 @@ if (APPLE AND NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET)
         CACHE STRING "Minimum macOS version supported by this build")
     unset(_SIMPLEGRAPHIC_MACOS_DEPLOYMENT_TARGET)
 endif ()
+
+# The LuaJIT port uses a Make-based configure wrapper. Unlike CMake ports,
+# vcpkg does not promise that a custom triplet variable is visible in that
+# portfile after it has queried CMake variables. Export the same effective
+# target CMake is using before project() loads the vcpkg toolchain, so every
+# child vcpkg and Make process receives one unambiguous deployment floor.
+if (APPLE AND DEFINED CMAKE_OSX_DEPLOYMENT_TARGET AND NOT CMAKE_OSX_DEPLOYMENT_TARGET STREQUAL "")
+    set(ENV{MACOSX_DEPLOYMENT_TARGET} "${CMAKE_OSX_DEPLOYMENT_TARGET}")
+endif ()
 unset(_SIMPLEGRAPHIC_TARGET_ARCHITECTURE)
 
 project(PathOfBuildingSimpleGraphic VERSION 2.6.0 LANGUAGES C CXX)
