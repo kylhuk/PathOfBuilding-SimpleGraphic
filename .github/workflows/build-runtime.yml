@@ -171,11 +171,12 @@ jobs:
         run: |
           set -euo pipefail
           docker run --rm \
+            --platform linux/386 \
             --volume "$GITHUB_WORKSPACE:/src" \
             --workdir /src \
             --env VCPKG_DISABLE_METRICS \
             --env DEBIAN_FRONTEND=noninteractive \
-            i386/ubuntu:24.04 \
+            debian:12 \
             bash -lc '
               set -euo pipefail
               apt-get update
