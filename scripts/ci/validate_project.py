@@ -23,7 +23,7 @@ def main() -> int:
         cmake = require(ROOT / "CMakeLists.txt")
         presets = json.loads(require(ROOT / "CMakePresets.json"))
         configuration = json.loads(require(ROOT / "vcpkg-configuration.json"))
-        require(ROOT / ".github/workflows/build-runtime.yml")
+        build_runtime = require(ROOT / ".github/workflows/build-runtime.yml")
         require(ROOT / ".github/workflows/dev-build.yml")
         release = require(ROOT / ".github/workflows/release.yml")
         require(ROOT / ".github/workflows/validate.yml")
@@ -71,6 +71,11 @@ def main() -> int:
                 raise RuntimeError("LuaSocket core modules do not have distinct build output directories")
         if "runtime_smoke.cpp" not in cmake or "SimpleGraphicRuntimeSmoke" not in require(ROOT / "runtime_smoke.cpp") or "--smoke-modules" not in require(ROOT / "launcher/main.cpp"):
             raise RuntimeError("staged runtime smoke coverage is missing")
+        luajit_configure = require(ROOT / "vcpkg-ports/ports/luajit/2026-07-20_1/configure")
+        if "'LJ_TARGET_ARM 1'" not in luajit_configure or "'LJ_TARGET_X86 1'" not in luajit_configure:
+            raise RuntimeError("LuaJIT's 32-bit manual buildvm architecture tokens are incomplete")
+        if '"-DCMAKE_INSTALL_PREFIX=$stage"' not in build_runtime:
+            raise RuntimeError("Windows runtime staging does not expand its CMake install prefix")
         if "workflow_dispatch:" not in release or "release:" in release.split("on:", 1)[1].split("permissions:", 1)[0]:
             raise RuntimeError("release workflow must be manual-only")
         if (ROOT / ".github/workflows/main.yml").exists():

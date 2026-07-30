@@ -97,9 +97,9 @@ jobs:
           $stage = "$env:GITHUB_WORKSPACE/out/stage/${{ matrix.id }}"
           $archive = "$env:GITHUB_WORKSPACE/out/artifacts/PathOfBuilding-SimpleGraphic-${{ matrix.id }}.zip"
           cmake -S . -B $build -G "Visual Studio 17 2022" -A "${{ matrix.architecture }}" `
-            -DCMAKE_INSTALL_PREFIX=$stage `
+            "-DCMAKE_INSTALL_PREFIX=$stage" `
             -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} `
-            -DVCPKG_OVERLAY_TRIPLETS="$env:GITHUB_WORKSPACE/vcpkg-triplets" `
+            "-DVCPKG_OVERLAY_TRIPLETS=$env:GITHUB_WORKSPACE/vcpkg-triplets" `
             -DSIMPLEGRAPHIC_BUILD_TESTS=ON
           cmake --build $build --config Release --parallel
           ctest --test-dir $build -C Release --output-on-failure
