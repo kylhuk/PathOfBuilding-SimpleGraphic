@@ -36,6 +36,8 @@ def main() -> int:
             raise RuntimeError("vcpkg dynamic triplet overlay is not configured")
         if "RUNTIME_DEPENDENCY_SET simplegraphic_runtime_dependencies" not in cmake:
             raise RuntimeError("CMake does not stage transitive runtime dependencies")
+        if "if (UNIX AND NOT APPLE)\n    target_compile_definitions(SimpleGraphic PRIVATE _POSIX_C_SOURCE=200809L)" not in cmake:
+            raise RuntimeError("Darwin must not receive Linux POSIX feature macros")
         if "GLM_ENABLE_EXPERIMENTAL" not in cmake:
             raise RuntimeError("CMake does not opt in to GLM extensions required by GLI")
         gli_portfile = require(ROOT / "vcpkg-ports/ports/gli/2021-07-06_3/portfile.cmake")

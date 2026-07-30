@@ -250,7 +250,7 @@ target_compile_definitions(SimpleGraphic PRIVATE
     GL_SILENCE_DEPRECATION
     SIMPLEGRAPHIC_EXPORTS
 )
-if (UNIX)
+if (UNIX AND NOT APPLE)
     target_compile_definitions(SimpleGraphic PRIVATE _POSIX_C_SOURCE=200809L)
 endif ()
 target_include_directories(SimpleGraphic
@@ -414,8 +414,10 @@ endif ()
 
 add_library(lzip MODULE libs/LZip/lzip.cpp)
 target_link_libraries(lzip PRIVATE LuaJIT::LuaJIT ZLIB::ZLIB)
-if (UNIX)
+if (UNIX AND NOT APPLE)
     target_compile_definitions(lzip PRIVATE _FILE_OFFSET_BITS=64 _POSIX_C_SOURCE=200809L)
+elseif (UNIX)
+    target_compile_definitions(lzip PRIVATE _FILE_OFFSET_BITS=64)
 endif ()
 
 set(SIMPLEGRAPHIC_LUA_ROOT_MODULE_TARGETS lcurl lua_utf8 lzip)
