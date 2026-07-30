@@ -9,6 +9,7 @@ vcpkg_from_github(
     PATCHES
         bump-cmake-version.patch
         disable-test.patch
+        qualify-make-vec4.patch
 )
 
 vcpkg_cmake_configure(

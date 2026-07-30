@@ -3,3 +3,6 @@
 *.c whitespace=cr-at-eol
 *.cpp whitespace=cr-at-eol
 *.h whitespace=cr-at-eol
+
+# Unified diffs preserve upstream indentation after the context marker.
+*.patch whitespace=-blank-at-eol,-space-before-tab

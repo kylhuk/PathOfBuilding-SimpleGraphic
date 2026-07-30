@@ -38,8 +38,17 @@ def main() -> int:
             raise RuntimeError("CMake does not stage transitive runtime dependencies")
         if "GLM_ENABLE_EXPERIMENTAL" not in cmake:
             raise RuntimeError("CMake does not opt in to GLM extensions required by GLI")
+        gli_portfile = require(ROOT / "vcpkg-ports/ports/gli/2021-07-06_3/portfile.cmake")
+        gli_patch = require(ROOT / "vcpkg-ports/ports/gli/2021-07-06_3/qualify-make-vec4.patch")
+        if "qualify-make-vec4.patch" not in gli_portfile or gli_patch.count("gli::make_vec4") != 4:
+            raise RuntimeError("GLI is not patched for the current GLM make_vec4 API")
         if "#include <fmt/format.h>" not in require(ROOT / "engine/core/core_config.cpp"):
             raise RuntimeError("core config does not include fmt's formatting API")
+        system_main = require(ROOT / "engine/system/win/sys_main.cpp")
+        if system_main.count("std::nullopt, std::string{") != 2:
+            raise RuntimeError("user-path errors do not use portable optional construction")
+        if "sys->Sleep(1);" not in require(ROOT / "engine/render/r_main.cpp"):
+            raise RuntimeError("renderer does not use the platform-neutral sleep API")
         # LuaSocket intentionally has both socket.core and mime.core. Their
         # identical filenames need separate build directories, not only
         # separate install destinations, or Ninja rejects the generated graph.

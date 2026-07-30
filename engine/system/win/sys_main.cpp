@@ -37,8 +37,11 @@ extern char** environ;
 #include <cstring>
 #include <filesystem>
 #include <map>
+#include <optional>
 #include <set>
+#include <string>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 #include <fmt/core.h>
@@ -700,7 +703,7 @@ std::tuple<std::optional<std::filesystem::path>, std::optional<std::string>> Fin
 	if (FAILED(hr)) {
 		// The path may be inaccessible due to malfunctioning cloud providers.
 		CoTaskMemFree(osPath);
-		return { {}, "Could not obtain Documents path from Windows" };
+		return { std::nullopt, std::string{"Could not obtain Documents path from Windows"} };
 	}
 	std::wstring pathStr = osPath;
 	CoTaskMemFree(osPath);
@@ -721,7 +724,7 @@ std::tuple<std::optional<std::filesystem::path>, std::optional<std::string>> Fin
 	uid_t uid = getuid();
 	struct passwd *pw = getpwuid(uid);
 	if (!pw || !pw->pw_dir) {
-		return { {}, "Could not obtain a user data path from the operating system" };
+		return { std::nullopt, std::string{"Could not obtain a user data path from the operating system"} };
 	}
 	return { std::filesystem::path(pw->pw_dir) / ".local/share", {} };
 #endif
