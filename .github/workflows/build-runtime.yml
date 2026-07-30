@@ -190,7 +190,7 @@ jobs:
                 build-essential ca-certificates cmake curl git ninja-build \
                 libegl1-mesa-dev libgl1-mesa-dev libglu1-mesa-dev mesa-common-dev \
                 libxcursor-dev libxi-dev libxinerama-dev libxrandr-dev libx11-dev \
-                pkg-config python3 tar unzip xorg-dev zip
+                pkg-config python3 python3-venv tar unzip xorg-dev zip
               # The bind mount is owned by the GitHub runner user while this
               # disposable container runs as root. vcpkg consults its Git
               # registry, so make both repositories explicitly trustworthy.
