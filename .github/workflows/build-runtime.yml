@@ -173,11 +173,14 @@ jobs:
           # Docker runs 32-bit userland on the x64 kernel, whose default
           # uname result would make vcpkg bootstrap an incompatible x64 host
           # tool. linux32 selects the matching process personality first.
+          # Debian 12's native Ninja is intentionally used for the x86
+          # container: vcpkg cannot download its x64-only tool bundle there.
           docker run --rm \
             --platform linux/386 \
             --volume "$GITHUB_WORKSPACE:/src" \
             --workdir /src \
             --env VCPKG_DISABLE_METRICS \
+            --env VCPKG_FORCE_SYSTEM_BINARIES=1 \
             --env DEBIAN_FRONTEND=noninteractive \
             debian:12 \
             linux32 bash -lc '
