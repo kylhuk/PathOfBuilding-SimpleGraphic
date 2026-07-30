@@ -36,6 +36,12 @@ def main() -> int:
             raise RuntimeError("vcpkg dynamic triplet overlay is not configured")
         if "RUNTIME_DEPENDENCY_SET simplegraphic_runtime_dependencies" not in cmake:
             raise RuntimeError("CMake does not stage transitive runtime dependencies")
+        # LuaSocket intentionally has both socket.core and mime.core. Their
+        # identical filenames need separate build directories, not only
+        # separate install destinations, or Ninja rejects the generated graph.
+        for output_dir in ("${CMAKE_CURRENT_BINARY_DIR}/lua/socket", "${CMAKE_CURRENT_BINARY_DIR}/lua/mime"):
+            if output_dir not in cmake:
+                raise RuntimeError("LuaSocket core modules do not have distinct build output directories")
         if "runtime_smoke.cpp" not in cmake or "SimpleGraphicRuntimeSmoke" not in require(ROOT / "runtime_smoke.cpp") or "--smoke-modules" not in require(ROOT / "launcher/main.cpp"):
             raise RuntimeError("staged runtime smoke coverage is missing")
         if "workflow_dispatch:" not in release or "release:" in release.split("on:", 1)[1].split("permissions:", 1)[0]:

@@ -363,7 +363,14 @@ target_link_libraries(luasocket PRIVATE LuaJIT::LuaJIT)
 if (WIN32)
     target_link_libraries(luasocket PRIVATE wsock32 ws2_32)
 endif ()
-set_target_properties(luasocket PROPERTIES OUTPUT_NAME "core")
+# socket.core and mime.core share their filename by Lua convention. Keep
+# their build outputs in the same hierarchy used by the installed payload so
+# single-config generators never emit two rules for one core.so/core.dll.
+set_target_properties(luasocket PROPERTIES
+    OUTPUT_NAME "core"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/lua/socket"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/lua/socket"
+)
 
 add_library(luasocket_mime MODULE
     libs/luasocket/src/mime.c
@@ -371,7 +378,11 @@ add_library(luasocket_mime MODULE
 )
 target_include_directories(luasocket_mime PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/libs/luasocket/src")
 target_link_libraries(luasocket_mime PRIVATE LuaJIT::LuaJIT)
-set_target_properties(luasocket_mime PROPERTIES OUTPUT_NAME "core")
+set_target_properties(luasocket_mime PROPERTIES
+    OUTPUT_NAME "core"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/lua/mime"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/lua/mime"
+)
 
 set(SIMPLEGRAPHIC_LUA_NESTED_MODULE_TARGETS luasocket luasocket_mime)
 if (UNIX)
@@ -389,7 +400,11 @@ if (UNIX)
     )
     target_include_directories(luasocket_unix PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/libs/luasocket/src")
     target_link_libraries(luasocket_unix PRIVATE LuaJIT::LuaJIT)
-    set_target_properties(luasocket_unix PROPERTIES OUTPUT_NAME "unix")
+    set_target_properties(luasocket_unix PROPERTIES
+        OUTPUT_NAME "unix"
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/lua/socket"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/lua/socket"
+    )
     if (APPLE)
         target_compile_definitions(luasocket_unix PRIVATE UNIX_HAS_SUN_LEN)
     endif ()
