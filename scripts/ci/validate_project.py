@@ -36,6 +36,10 @@ def main() -> int:
             raise RuntimeError("vcpkg dynamic triplet overlay is not configured")
         if "RUNTIME_DEPENDENCY_SET simplegraphic_runtime_dependencies" not in cmake:
             raise RuntimeError("CMake does not stage transitive runtime dependencies")
+        if "GLM_ENABLE_EXPERIMENTAL" not in cmake:
+            raise RuntimeError("CMake does not opt in to GLM extensions required by GLI")
+        if "#include <fmt/format.h>" not in require(ROOT / "engine/core/core_config.cpp"):
+            raise RuntimeError("core config does not include fmt's formatting API")
         # LuaSocket intentionally has both socket.core and mime.core. Their
         # identical filenames need separate build directories, not only
         # separate install destinations, or Ninja rejects the generated graph.
