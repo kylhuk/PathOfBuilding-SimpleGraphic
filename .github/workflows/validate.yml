@@ -31,5 +31,8 @@ jobs:
       - name: Test release metadata tooling
         run: python3 scripts/ci/test_release_tools.py
 
+      - name: Test standalone launcher contracts
+        run: python3 scripts/ci/test_launcher_paths.py
+
       - name: Check patch whitespace
         run: git diff --check HEAD^ HEAD

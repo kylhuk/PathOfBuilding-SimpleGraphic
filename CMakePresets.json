@@ -22,6 +22,11 @@
       "name": "linux-x86",
       "inherits": "base",
       "cacheVariables": {
+        "CMAKE_C_FLAGS": "-m32",
+        "CMAKE_CXX_FLAGS": "-m32",
+        "CMAKE_EXE_LINKER_FLAGS": "-m32",
+        "CMAKE_SHARED_LINKER_FLAGS": "-m32",
+        "CMAKE_MODULE_LINKER_FLAGS": "-m32",
         "VCPKG_TARGET_TRIPLET": "x86-linux-dynamic"
       }
     },
@@ -42,16 +47,24 @@
     {
       "name": "macos-x64",
       "inherits": "base",
+      "environment": {
+        "MACOSX_DEPLOYMENT_TARGET": "10.15"
+      },
       "cacheVariables": {
         "CMAKE_OSX_ARCHITECTURES": "x86_64",
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "10.15",
         "VCPKG_TARGET_TRIPLET": "x64-osx-dynamic"
       }
     },
     {
       "name": "macos-arm64",
       "inherits": "base",
+      "environment": {
+        "MACOSX_DEPLOYMENT_TARGET": "11.0"
+      },
       "cacheVariables": {
         "CMAKE_OSX_ARCHITECTURES": "arm64",
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "11.0",
         "VCPKG_TARGET_TRIPLET": "arm64-osx-dynamic"
       }
     },

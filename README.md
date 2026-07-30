@@ -29,6 +29,8 @@ are included for maintainers who set `ENABLE_WINDOWS10_SMOKE=true` (x64/x86
 compatibility) and/or `ENABLE_WINDOWS10_ARM64_SMOKE=true` (native ARM64).
 The matching self-hosted runners retrieve their just-built artifact through the
 pinned GitHub Actions download step, so they do not need the GitHub CLI.
+macOS Intel packages target macOS 10.15 and later; Apple-Silicon packages
+target macOS 11.0 and later.
 
 ## Building
 
@@ -62,7 +64,8 @@ windows-x86     windows-x64     windows-arm64
 
 For `linux-x86` on a 64-bit Debian/Ubuntu host, install the 32-bit compiler
 and C library headers first (`gcc-multilib g++-multilib libc6-dev-i386`), or
-use the native i386 container recipe in the build workflow.
+use the native i386 container recipe in the build workflow. The preset adds
+the required `-m32` compile and linker flags automatically.
 
 Windows presets use the Visual Studio generator. For example:
 
@@ -106,7 +109,8 @@ The repository uses four workflows:
 
 For a prerelease, `CMakeLists.txt` retains the numeric version core while
 `config.h` and `vcpkg.json` declare the complete SemVer string (for example
-`2.6.0-rc.1`). The manual workflow checks both forms before it creates a tag.
+`2.6.0-rc.1+build.5`). The manual workflow checks both forms before it creates
+a tag.
 
 Release archives contain one top-level directory named for their target,
 which makes them safe inputs to setup/installer tooling. The release includes

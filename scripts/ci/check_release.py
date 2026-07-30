@@ -15,9 +15,12 @@ def main() -> int:
     parser.add_argument("--version", required=True)
     parser.add_argument("--root", type=Path, default=Path("."))
     args = parser.parse_args()
-    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?", args.version):
+    if not re.fullmatch(
+        r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?",
+        args.version,
+    ):
         print(
-            "version must be SemVer without a leading v, for example 2.6.0 or 2.6.0-rc.1",
+            "version must be SemVer without a leading v, for example 2.6.0 or 2.6.0-rc.1+build.5",
             file=sys.stderr,
         )
         return 2

@@ -26,8 +26,11 @@ def main() -> int:
         build_runtime = require(ROOT / ".github/workflows/build-runtime.yml")
         require(ROOT / ".github/workflows/dev-build.yml")
         release = require(ROOT / ".github/workflows/release.yml")
-        require(ROOT / ".github/workflows/validate.yml")
+        validate = require(ROOT / ".github/workflows/validate.yml")
         require(ROOT / ".github/dependabot.yml")
+        require(ROOT / "scripts/ci/test_launcher_paths.py")
+        if "test_launcher_paths.py" not in validate:
+            raise RuntimeError("source validation does not exercise the standalone launcher")
 
         baseline = configuration["default-registry"]["baseline"]
         if not re.fullmatch(r"[0-9a-f]{40}", baseline):
@@ -74,8 +77,29 @@ def main() -> int:
         if "runtime_smoke.cpp" not in cmake or "SimpleGraphicRuntimeSmoke" not in require(ROOT / "runtime_smoke.cpp") or "--smoke-modules" not in require(ROOT / "launcher/main.cpp"):
             raise RuntimeError("staged runtime smoke coverage is missing")
         launcher = require(ROOT / "launcher/main.cpp")
-        if "std::filesystem::absolute(" not in launcher or "std::vector<char*> runtimeArgs" not in launcher:
+        executable_path = require(ROOT / "engine/system/executable_path.h")
+        if (
+            "SimpleGraphicExecutablePath(std::error_code& error)" not in executable_path
+            or "GetModuleFileNameW" not in executable_path
+            or 'readlink("/proc/self/exe"' not in executable_path
+            or "proc_pidpath" not in executable_path
+            or "std::filesystem::weakly_canonical" not in executable_path
+        ):
+            raise RuntimeError("the shared executable-image resolver is incomplete")
+        if '"engine/system/executable_path.h"' not in cmake:
+            raise RuntimeError("the executable-image resolver is not tracked by CMake")
+        if (
+            "std::filesystem::absolute(" not in launcher
+            or "std::vector<char*> runtimeArgs" not in launcher
+            or "SimpleGraphicExecutablePath(error)" not in launcher
+            or 'std::filesystem::absolute(std::filesystem::u8path(argv[0])' in launcher
+        ):
             raise RuntimeError("standalone launcher does not preserve caller-relative script paths")
+        if (
+            "#define SIMPLEGRAPHIC_VERSION CFG_VERSION_NUM" not in launcher
+            or 'SIMPLEGRAPHIC_VERSION="${PROJECT_VERSION}"' in cmake
+        ):
+            raise RuntimeError("standalone launcher does not report the complete SemVer")
         debug = require(ROOT / "ui_debug.cpp")
         if "lua_getstack(state, 1, &caller)" not in debug or "AddLineHit(call->lineHits, caller)" not in debug:
             raise RuntimeError("profiler hot-call lines are not attributed to callers")
@@ -83,7 +107,10 @@ def main() -> int:
         if "filename = archive.name" not in release_manifest:
             raise RuntimeError("release metadata does not name flattened release assets")
         check_release = require(ROOT / "scripts/ci/check_release.py")
-        if "numeric_version = args.version.split" not in check_release:
+        if (
+            "numeric_version = args.version.split" not in check_release
+            or "(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?" not in check_release
+        ):
             raise RuntimeError("release metadata does not support prerelease version cores")
         runtime_dependency_start = cmake.index(
             "install(RUNTIME_DEPENDENCY_SET simplegraphic_runtime_dependencies"
@@ -115,6 +142,30 @@ def main() -> int:
             raise RuntimeError("Linux x86 container script contains an unsafe single quote")
         if "cmake==3.31.1" not in x86_container_script or "--only-binary=:all:" not in x86_container_script:
             raise RuntimeError("Linux x86 does not provision its pinned binary CMake")
+        if 'grep -q "Class:.*ELF32"' not in x86_container_script:
+            raise RuntimeError("Linux x86 build does not assert a 32-bit staged payload")
+        if (
+            "deployment_target: '10.15'" not in build_runtime
+            or "deployment_target: '11.0'" not in build_runtime
+            or "export MACOSX_DEPLOYMENT_TARGET" not in build_runtime
+            or "-DCMAKE_OSX_DEPLOYMENT_TARGET" not in build_runtime
+            or "--macos-deployment-target" not in build_runtime
+        ):
+            raise RuntimeError("macOS deployment target is not propagated through CI")
+        luajit_port = require(ROOT / "vcpkg-ports/ports/luajit/2026-07-20_1/portfile.cmake")
+        if (
+            "MACOSX_DEPLOYMENT_TARGET=" not in luajit_port
+            or "VCPKG_OSX_DEPLOYMENT_TARGET for a Darwin build" not in luajit_port
+        ):
+            raise RuntimeError("LuaJIT does not receive the macOS deployment target")
+        luajit_makefile = require(ROOT / "vcpkg-ports/ports/luajit/2026-07-20_1/configure")
+        if (
+            "LUAJIT_MACOSX_DEPLOYMENT_TARGET" not in luajit_makefile
+            or "export MACOSX_DEPLOYMENT_TARGET" not in luajit_makefile
+        ):
+            raise RuntimeError("LuaJIT's generated Makefile does not export its deployment target")
+        if (ROOT / "vcpkg-ports/ports/luajit/2026-07-20_1/003-do-not-set-macosx-deployment-target.patch").exists():
+            raise RuntimeError("LuaJIT still suppresses missing macOS deployment-target errors")
         if "workflow_dispatch:" not in release or "release:" in release.split("on:", 1)[1].split("permissions:", 1)[0]:
             raise RuntimeError("release workflow must be manual-only")
         if (ROOT / ".github/workflows/main.yml").exists():
@@ -123,7 +174,10 @@ def main() -> int:
             path.read_text(encoding="utf-8") for path in (ROOT / ".github/workflows").glob("*.yml")
         ):
             raise RuntimeError("mutable run-vcpkg action remains")
-        names = {preset["name"] for preset in presets["configurePresets"] if not preset.get("hidden")}
+        preset_by_name = {
+            preset["name"]: preset for preset in presets["configurePresets"] if not preset.get("hidden")
+        }
+        names = set(preset_by_name)
         expected = {
             "windows-x86", "windows-x64", "windows-arm64",
             "macos-x64", "macos-arm64",
@@ -131,6 +185,34 @@ def main() -> int:
         }
         if names != expected:
             raise RuntimeError(f"CMake preset matrix is incomplete: expected {sorted(expected)}, got {sorted(names)}")
+        x86_cache = preset_by_name["linux-x86"]["cacheVariables"]
+        for flag in (
+            "CMAKE_C_FLAGS",
+            "CMAKE_CXX_FLAGS",
+            "CMAKE_EXE_LINKER_FLAGS",
+            "CMAKE_SHARED_LINKER_FLAGS",
+            "CMAKE_MODULE_LINKER_FLAGS",
+        ):
+            if x86_cache.get(flag) != "-m32":
+                raise RuntimeError(f"linux-x86 preset does not set {flag}=-m32")
+        for name, architecture, deployment_target, triplet in (
+            ("macos-x64", "x86_64", "10.15", "x64-osx-dynamic"),
+            ("macos-arm64", "arm64", "11.0", "arm64-osx-dynamic"),
+        ):
+            preset = preset_by_name[name]
+            cache = preset["cacheVariables"]
+            if (
+                cache.get("CMAKE_OSX_ARCHITECTURES") != architecture
+                or cache.get("CMAKE_OSX_DEPLOYMENT_TARGET") != deployment_target
+                or cache.get("VCPKG_TARGET_TRIPLET") != triplet
+                or preset.get("environment", {}).get("MACOSX_DEPLOYMENT_TARGET") != deployment_target
+            ):
+                raise RuntimeError(f"{name} does not preserve its macOS architecture and deployment target")
+            triplet_file = require(ROOT / "vcpkg-triplets" / f"{triplet}.cmake")
+            if f'set(VCPKG_OSX_DEPLOYMENT_TARGET "{deployment_target}")' not in triplet_file:
+                raise RuntimeError(f"{triplet} does not propagate its macOS deployment target to vcpkg")
+        if cmake.index("CMAKE_OSX_DEPLOYMENT_TARGET") > cmake.index("project("):
+            raise RuntimeError("CMake's direct macOS deployment-target default is set too late")
         print("source, presets, package staging, and manual-release contract are valid")
         return 0
     except (KeyError, RuntimeError, json.JSONDecodeError) as error:

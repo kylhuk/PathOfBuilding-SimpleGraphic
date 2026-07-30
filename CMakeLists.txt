@@ -39,6 +39,20 @@ if (UNIX AND NOT DEFINED VCPKG_TARGET_TRIPLET)
     unset(_SIMPLEGRAPHIC_UNIX_TRIPLET)
 endif ()
 
+# Keep direct macOS CMake invocations compatible with the same operating
+# system baselines as the shipped presets.  Presets and CI pass this cache
+# entry explicitly; this default closes the gap for a fresh `cmake -S -B`.
+if (APPLE AND NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET)
+    if (CMAKE_OSX_ARCHITECTURES MATCHES "(^|;)arm64(;|$)" OR CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
+        set(_SIMPLEGRAPHIC_MACOS_DEPLOYMENT_TARGET "11.0")
+    else ()
+        set(_SIMPLEGRAPHIC_MACOS_DEPLOYMENT_TARGET "10.15")
+    endif ()
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "${_SIMPLEGRAPHIC_MACOS_DEPLOYMENT_TARGET}"
+        CACHE STRING "Minimum macOS version supported by this build")
+    unset(_SIMPLEGRAPHIC_MACOS_DEPLOYMENT_TARGET)
+endif ()
+
 project(PathOfBuildingSimpleGraphic VERSION 2.6.0 LANGUAGES C CXX)
 
 if (UNIX AND DEFINED VCPKG_TARGET_TRIPLET AND NOT VCPKG_TARGET_TRIPLET MATCHES "-dynamic$")
@@ -142,6 +156,7 @@ set(SIMPLEGRAPHIC_SOURCES
     "engine/system/win/sys_main.cpp"
     "engine/system/win/sys_opengl.cpp"
     "engine/system/win/sys_video.cpp"
+    "engine/system/executable_path.h"
     "engine/system/sys_console.h"
     "engine/system/sys_main.h"
     "engine/system/sys_opengl.h"
@@ -307,7 +322,6 @@ endif ()
 if (SIMPLEGRAPHIC_BUILD_HOST)
     add_executable(SimpleGraphicHost launcher/main.cpp)
     target_link_libraries(SimpleGraphicHost PRIVATE SimpleGraphic)
-    target_compile_definitions(SimpleGraphicHost PRIVATE SIMPLEGRAPHIC_VERSION="${PROJECT_VERSION}")
     set_target_properties(SimpleGraphicHost PROPERTIES OUTPUT_NAME "PathOfBuilding-SimpleGraphic")
     if (SIMPLEGRAPHIC_RUNTIME_RPATH)
         set_target_properties(SimpleGraphicHost PROPERTIES

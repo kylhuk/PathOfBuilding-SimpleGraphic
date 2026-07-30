@@ -100,6 +100,14 @@ def test_prerelease_versions() -> None:
         write_release_metadata(root, cmake="2.6.0", config="2.6.0-rc.1", vcpkg="2.6.0-rc.1")
         run([*command, "--version", "2.6.0-rc.1"])
 
+        write_release_metadata(
+            root,
+            cmake="2.6.0",
+            config="2.6.0-rc.1+build.5",
+            vcpkg="2.6.0-rc.1+build.5",
+        )
+        run([*command, "--version", "2.6.0-rc.1+build.5"])
+
         write_release_metadata(root, cmake="2.6.0", config="2.6.0", vcpkg="2.6.0")
         run([*command, "--version", "2.6.0-rc.1"], expect_success=False)
 

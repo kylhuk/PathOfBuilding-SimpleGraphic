@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -54,6 +55,48 @@ def macos_loader_paths(path: Path) -> tuple[list[str], list[str]]:
             rpaths.append(stripped[5:].split(" (", 1)[0])
             command_is_rpath = False
     return loaded, rpaths
+
+
+def macos_minimum_version(path: Path) -> str:
+    load_commands = subprocess.run(
+        ["otool", "-l", str(path)], text=True, capture_output=True, check=False
+    )
+    if load_commands.returncode:
+        raise RuntimeError(f"could not inspect macOS deployment target for {path}")
+
+    command = ""
+    for line in load_commands.stdout.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("cmd "):
+            command = stripped[4:]
+        elif command == "LC_BUILD_VERSION" and stripped.startswith("minos "):
+            return stripped[6:].split(" ", 1)[0]
+        elif command == "LC_VERSION_MIN_MACOSX" and stripped.startswith("version "):
+            return stripped[8:].split(" ", 1)[0]
+    raise RuntimeError(f"could not find a macOS deployment target in {path}")
+
+
+def normalized_version(value: str) -> tuple[int, ...]:
+    if not re.fullmatch(r"[0-9]+(?:\.[0-9]+){0,2}", value):
+        raise RuntimeError(f"invalid platform version emitted by the linker: {value!r}")
+    parts = [int(part) for part in value.split(".")]
+    while len(parts) > 1 and parts[-1] == 0:
+        parts.pop()
+    return tuple(parts)
+
+
+def check_macos_deployment_target(files: list[Path], expected: str | None) -> None:
+    if expected is None:
+        return
+    if not shutil.which("otool"):
+        raise RuntimeError("otool is required to validate macOS deployment targets")
+    expected_parts = normalized_version(expected)
+    for path in files:
+        actual = macos_minimum_version(path)
+        if normalized_version(actual) != expected_parts:
+            raise RuntimeError(
+                f"{path} targets macOS {actual}, expected macOS {expected}"
+            )
 
 
 def check_loader_paths(platform: str, files: list[Path]) -> None:
@@ -110,20 +153,36 @@ def relocation_directory() -> tempfile.TemporaryDirectory[str]:
     return tempfile.TemporaryDirectory(prefix="simplegraphic-runtime-", dir=location)
 
 
-def verify_runtime(host: Path, runtime: Path, platform: str, files: list[Path]) -> None:
+def verify_runtime(
+    host: Path,
+    working_directory: Path,
+    platform: str,
+    files: list[Path],
+    macos_deployment_target: str | None,
+) -> None:
     environment = clean_loader_environment(platform)
-    if platform == "windows":
-        environment["PATH"] = str(runtime) + os.pathsep + environment.get("PATH", "")
-    run([str(host), "--version"], cwd=runtime, env=environment)
-    run([str(host), "--smoke-modules"], cwd=runtime, env=environment)
+    environment["PATH"] = str(host.parent) + os.pathsep + environment.get("PATH", "")
+    # POSIX execution uses only the host's basename from an unrelated CWD.
+    # This verifies that --smoke-modules finds the actual process image rather
+    # than treating argv[0] as an absolute path. Use an absolute path on
+    # Windows because subprocess cannot reliably search a replacement PATH
+    # when shell=False there; the static contract covers its shared helper.
+    executable = str(host) if platform == "windows" else host.name
+    run([executable, "--version"], cwd=working_directory, env=environment)
+    run([executable, "--smoke-modules"], cwd=working_directory, env=environment)
     check_loader_paths(platform, files)
+    if platform == "macos":
+        check_macos_deployment_target(files, macos_deployment_target)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--runtime", required=True, type=Path)
     parser.add_argument("--platform", required=True, choices=("windows", "linux", "macos"))
+    parser.add_argument("--macos-deployment-target")
     args = parser.parse_args()
+    if args.macos_deployment_target and args.platform != "macos":
+        parser.error("--macos-deployment-target is only valid with --platform macos")
 
     runtime = args.runtime.resolve()
     if not runtime.is_dir():
@@ -149,7 +208,13 @@ def main() -> int:
 
     runtime_files = [host, simplegraphic, *module_paths]
     if args.platform == "windows":
-        verify_runtime(host, runtime, args.platform, runtime_files)
+        verify_runtime(
+            host,
+            runtime,
+            args.platform,
+            runtime_files,
+            args.macos_deployment_target,
+        )
     else:
         # Execute a byte-for-byte copy from an unrelated working directory.
         # This catches dependencies that happen to resolve only while the
@@ -168,6 +233,7 @@ def main() -> int:
                 relocated_working_directory,
                 args.platform,
                 relocated_files,
+                args.macos_deployment_target,
             )
     print(f"verified relocatable {args.platform} runtime: {runtime}")
     return 0

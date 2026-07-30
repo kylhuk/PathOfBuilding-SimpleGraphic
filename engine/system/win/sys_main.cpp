@@ -10,6 +10,8 @@
 
 #include "sys_local.h"
 
+#include "../executable_path.h"
+
 #include "core.h"
 
 #ifdef _WIN32
@@ -17,12 +19,8 @@
 #include <Shlobj.h>
 #elif defined(__linux__) || defined(__APPLE__)
 #include <unistd.h>
-#include <limits.h>
 #include <spawn.h>
 #include <sys/wait.h>
-#if __APPLE__ && __MACH__
-#include <libproc.h>
-#endif
 #endif
 
 #ifndef _WIN32
@@ -659,26 +657,8 @@ std::filesystem::path FindBasePath()
 		return ec ? std::filesystem::u8path(runtimeDir) : configuredPath;
 	}
 
-	std::filesystem::path progPath;
-#ifdef _WIN32
-	std::vector<wchar_t> basePath(1u << 16);
-	GetModuleFileNameW(NULL, basePath.data(), basePath.size());
-	progPath = basePath.data();
-#elif __linux__
-	char basePath[PATH_MAX];
-	ssize_t len = ::readlink("/proc/self/exe", basePath, sizeof(basePath));
-	if (len == -1 || len == sizeof(basePath))
-		len = 0;
-	basePath[len] = '\0';
-	progPath = basePath;
-#elif __APPLE__ && __MACH__
-	pid_t pid = getpid();
-	char basePath[PROC_PIDPATHINFO_MAXSIZE]{};
-	proc_pidpath(pid, basePath, sizeof(basePath));
-	progPath = basePath;
-#endif
 	std::error_code ec;
-	progPath = std::filesystem::weakly_canonical(progPath, ec);
+	auto progPath = SimpleGraphicExecutablePath(ec);
 	if (ec || progPath.empty()) {
 		progPath = std::filesystem::current_path(ec);
 		return ec ? std::filesystem::path{} : progPath;

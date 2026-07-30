@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "config.h"
+#include "engine/system/executable_path.h"
 #include "simplegraphic.h"
 
 #ifndef SIMPLEGRAPHIC_VERSION
@@ -20,8 +21,8 @@ int main(int argc, char** argv)
 
     if (argc == 2 && std::strcmp(argv[1], "--smoke-modules") == 0) {
         std::error_code error;
-        const auto executable = std::filesystem::absolute(std::filesystem::u8path(argv[0]), error);
-        if (error) {
+        const auto executable = SimpleGraphicExecutablePath(error);
+        if (error || executable.empty()) {
             std::fputs("Unable to determine the runtime directory.\n", stderr);
             return 2;
         }

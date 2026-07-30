@@ -50,12 +50,14 @@ jobs:
             os: macos-15-intel
             family: macos
             architecture: x86_64
+            deployment_target: '10.15'
             triplet: x64-osx-dynamic
             archive: tar.gz
           - id: macos-arm64
             os: macos-15
             family: macos
             architecture: arm64
+            deployment_target: '11.0'
             triplet: arm64-osx-dynamic
             archive: tar.gz
           - id: linux-x64
@@ -143,17 +145,28 @@ jobs:
           build="$GITHUB_WORKSPACE/out/build/${{ matrix.id }}"
           stage="$GITHUB_WORKSPACE/out/stage/${{ matrix.id }}"
           archive="$GITHUB_WORKSPACE/out/artifacts/PathOfBuilding-SimpleGraphic-${{ matrix.id }}.tar.gz"
-          cmake -S . -B "$build" -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_OSX_ARCHITECTURES="${{ matrix.architecture }}" \
-            -DCMAKE_INSTALL_PREFIX="$stage" \
-            -DVCPKG_TARGET_TRIPLET="${{ matrix.triplet }}" \
-            -DVCPKG_OVERLAY_TRIPLETS="$GITHUB_WORKSPACE/vcpkg-triplets" \
+          cmake_args=(
+            -S . -B "$build" -G Ninja
+            -DCMAKE_BUILD_TYPE=Release
+            -DCMAKE_INSTALL_PREFIX="$stage"
+            -DVCPKG_TARGET_TRIPLET="${{ matrix.triplet }}"
+            -DVCPKG_OVERLAY_TRIPLETS="$GITHUB_WORKSPACE/vcpkg-triplets"
             -DSIMPLEGRAPHIC_BUILD_TESTS=ON
+          )
+          verify_args=(--runtime "$stage" --platform "${{ matrix.family }}")
+          if [[ "${{ matrix.family }}" == "macos" ]]; then
+            export MACOSX_DEPLOYMENT_TARGET="${{ matrix.deployment_target }}"
+            cmake_args+=(
+              -DCMAKE_OSX_ARCHITECTURES="${{ matrix.architecture }}"
+              -DCMAKE_OSX_DEPLOYMENT_TARGET="$MACOSX_DEPLOYMENT_TARGET"
+            )
+            verify_args+=(--macos-deployment-target "$MACOSX_DEPLOYMENT_TARGET")
+          fi
+          cmake "${cmake_args[@]}"
           cmake --build "$build" --parallel
           ctest --test-dir "$build" --output-on-failure
           cmake --install "$build"
-          python3 scripts/ci/verify_runtime.py --runtime "$stage" --platform "${{ matrix.family }}"
+          python3 scripts/ci/verify_runtime.py "${verify_args[@]}"
           python3 scripts/ci/package_runtime.py --runtime "$stage" --output "$archive" --format tar.gz --name "PathOfBuilding-SimpleGraphic-${{ matrix.id }}"
 
       - name: Upload runtime archive
@@ -222,7 +235,7 @@ jobs:
               trap dump_vcpkg_failure_logs EXIT
               apt-get update
               apt-get install -y --no-install-recommends \
-                build-essential ca-certificates cmake curl git ninja-build \
+                binutils build-essential ca-certificates cmake curl git ninja-build \
                 libegl1-mesa-dev libgl1-mesa-dev libglu1-mesa-dev mesa-common-dev \
                 libxcursor-dev libxi-dev libxinerama-dev libxrandr-dev libx11-dev \
                 pkg-config python3 python3-venv tar unzip xorg-dev zip
@@ -247,6 +260,15 @@ jobs:
               cmake --build out/build/linux-x86 --parallel
               ctest --test-dir out/build/linux-x86 --output-on-failure
               cmake --install out/build/linux-x86
+              for binary in \
+                /src/out/stage/linux-x86/PathOfBuilding-SimpleGraphic \
+                /src/out/stage/linux-x86/SimpleGraphic.so; do
+                if ! readelf -h "$binary" | grep -q "Class:.*ELF32"; then
+                  echo "Expected an ELF32 runtime binary: $binary" >&2
+                  readelf -h "$binary" >&2 || true
+                  exit 1
+                fi
+              done
               python3 scripts/ci/verify_runtime.py --runtime /src/out/stage/linux-x86 --platform linux
               python3 scripts/ci/package_runtime.py \
                 --runtime /src/out/stage/linux-x86 \
