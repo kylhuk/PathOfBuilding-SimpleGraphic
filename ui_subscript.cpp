@@ -6,6 +6,7 @@
 
 #include "ui_local.h"
 
+#include <atomic>
 #include <condition_variable>
 #include <exception>
 #include <mutex>
@@ -56,6 +57,7 @@ public:
 	void ThreadProc();
 	bool StopRequested();
 	void RecordPanic(char const* message);
+	void CacheScriptMemory(lua_State* state);
 	ssTweenData_s* SubmitFunctionCall(std::string name, ssTweenData_s* request);
 	bool QueueSubCall(ssCall_s* call);
 
@@ -69,6 +71,7 @@ private:
 	std::thread worker;
 	std::mutex stateMutex;
 	std::condition_variable stateChanged;
+	std::atomic_size_t luaMemoryKilobytes = 0;
 	bool running = false;
 	bool finished = false;
 	bool stopRequested = false;
@@ -294,8 +297,21 @@ static int l_os_exit(lua_State*)
 static void l_hookStop(lua_State* L, lua_Debug*)
 {
 	auto* ss = GetSSPtr(L);
-	if (ss && ss->StopRequested()) {
-		luaL_error(L, "Sub script stopped");
+	if (ss) {
+		ss->CacheScriptMemory(L);
+		if (ss->StopRequested()) {
+			luaL_error(L, "Sub script stopped");
+		}
+	}
+}
+
+static void ssWipeCalls(ssCall_s* calls)
+{
+	while (calls) {
+		auto* call = calls;
+		calls = call->next;
+		ssWipeData(call->data);
+		delete call;
 	}
 }
 
@@ -326,6 +342,7 @@ bool ui_subscript_c::Start()
 		stopRequested = false;
 	}
 
+	luaMemoryKilobytes.store(0, std::memory_order_relaxed);
 	L = luaL_newstate();
 	if (!L) {
 		std::lock_guard<std::mutex> lock(stateMutex);
@@ -365,6 +382,7 @@ bool ui_subscript_c::Start()
 	}
 
 	lua_pushinteger(L, ssPushData(L, ssBuildData(ui->L, 4)));
+	CacheScriptMemory(L);
 	{
 		std::lock_guard<std::mutex> lock(stateMutex);
 		finished = false;
@@ -434,12 +452,7 @@ void ui_subscript_c::Stop()
 		running = false;
 		finished = false;
 	}
-	while (calls) {
-		auto* call = calls;
-		calls = call->next;
-		ssWipeData(call->data);
-		delete call;
-	}
+	ssWipeCalls(calls);
 	ssWipeData(pendingResponse);
 }
 
@@ -457,8 +470,17 @@ void ui_subscript_c::RecordPanic(char const* message)
 	stateChanged.notify_all();
 }
 
+void ui_subscript_c::CacheScriptMemory(lua_State* state)
+{
+	// This is called only by the thread currently owning the Lua state. The UI
+	// thread reads the atomic cache instead of concurrently entering Lua.
+	luaMemoryKilobytes.store(static_cast<size_t>(lua_gc(state, LUA_GCCOUNT, 0)),
+		std::memory_order_relaxed);
+}
+
 ssTweenData_s* ui_subscript_c::SubmitFunctionCall(std::string name, ssTweenData_s* request)
 {
+	CacheScriptMemory(L);
 	std::unique_lock<std::mutex> lock(stateMutex);
 	if (stopRequested) {
 		ssWipeData(request);
@@ -513,6 +535,7 @@ void ui_subscript_c::ThreadProc()
 	catch (...) {
 		exceptionText = "Unknown C++ exception in sub script";
 	}
+	CacheScriptMemory(L);
 
 	std::lock_guard<std::mutex> lock(stateMutex);
 	if (!exceptionText.empty()) {
@@ -564,6 +587,10 @@ void ui_subscript_c::CompleteFunctionRequest(ssTweenData_s* response)
 void ui_subscript_c::SubScriptFrame()
 {
 	for (auto* calls = TakeSubCalls(); calls;) {
+		if (StopRequested()) {
+			ssWipeCalls(calls);
+			return;
+		}
 		auto* call = calls;
 		calls = calls->next;
 		const int extraArgs = ui->PushCallback("OnSubCall");
@@ -576,6 +603,10 @@ void ui_subscript_c::SubScriptFrame()
 			ssWipeData(call->data);
 		}
 		delete call;
+		if (StopRequested()) {
+			ssWipeCalls(calls);
+			return;
+		}
 	}
 
 	ssCall_s request;
@@ -668,8 +699,5 @@ bool ui_subscript_c::IsRunning()
 
 size_t ui_subscript_c::GetScriptMemory()
 {
-	// LuaJIT must never be inspected concurrently with its worker. A finished
-	// worker is joined before UI code consumes its state.
-	std::lock_guard<std::mutex> lock(stateMutex);
-	return running ? 0 : (L ? static_cast<size_t>(lua_gc(L, LUA_GCCOUNT, 0)) : 0);
+	return luaMemoryKilobytes.load(std::memory_order_relaxed);
 }

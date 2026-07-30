@@ -80,6 +80,38 @@ ui_main_c::ui_main_c(sys_IMain* sysHnd, core_IMain* coreHnd)
 	renderer = NULL;
 }
 
+static void PrependLuaPackagePath(lua_State* state, char const* field, std::string const& entries)
+{
+	if (!state) {
+		return;
+	}
+
+	lua_getglobal(state, "package");
+	if (!lua_istable(state, -1)) {
+		lua_pop(state, 1);
+		return;
+	}
+	lua_getfield(state, -1, field);
+	char const* oldValue = lua_tostring(state, -1);
+	std::string combined = entries;
+	if (oldValue && *oldValue) {
+		combined += ";";
+		combined += oldValue;
+	}
+	lua_pop(state, 1);
+	lua_pushlstring(state, combined.c_str(), combined.size());
+	lua_setfield(state, -2, field);
+	lua_pop(state, 1);
+}
+
+static void ConfigureLuaScriptSearchPath(lua_State* state, std::filesystem::path const& scriptDirectory)
+{
+	auto root = scriptDirectory.generic_u8string();
+	if (!root.empty()) {
+		PrependLuaPackagePath(state, "path", root + "/?.lua;" + root + "/?/init.lua");
+	}
+}
+
 void ConfigureLuaSearchPaths(lua_State* state, std::filesystem::path const& runtimePath)
 {
 	if (!state) {
@@ -96,28 +128,9 @@ void ConfigureLuaSearchPaths(lua_State* state, std::filesystem::path const& runt
 	constexpr char moduleSuffix[] = ".so";
 #endif
 
-	auto prepend = [state](char const* field, std::string const& entries) {
-		lua_getglobal(state, "package");
-		if (!lua_istable(state, -1)) {
-			lua_pop(state, 1);
-			return;
-		}
-		lua_getfield(state, -1, field);
-		char const* oldValue = lua_tostring(state, -1);
-		std::string combined = entries;
-		if (oldValue && *oldValue) {
-			combined += ";";
-			combined += oldValue;
-		}
-		lua_pop(state, 1);
-		lua_pushlstring(state, combined.c_str(), combined.size());
-		lua_setfield(state, -2, field);
-		lua_pop(state, 1);
-	};
-
 	const std::string luaRoot = root + "/lua";
-	prepend("path", luaRoot + "/?.lua;" + luaRoot + "/?/init.lua");
-	prepend("cpath", luaRoot + "/?" + moduleSuffix + ";" + luaRoot + "/?/core" + moduleSuffix);
+	PrependLuaPackagePath(state, "path", luaRoot + "/?.lua;" + luaRoot + "/?/init.lua");
+	PrependLuaPackagePath(state, "cpath", luaRoot + "/?" + moduleSuffix + ";" + luaRoot + "/?/core" + moduleSuffix);
 }
 
 // =======================
@@ -358,6 +371,9 @@ void ui_main_c::ScriptInit()
 	lua_pushcfunction(L, InitAPI);
 	int err = lua_pcall(L, 0, 0, 0);
 	if (err) sys->Error("Error initialising Lua environment: \n%s\n", lua_tostring(L, -1));
+	// The process returns to basePath around script execution; keep the
+	// selected script's local Lua modules resolvable without relying on CWD.
+	ConfigureLuaScriptSearchPath(L, scriptWorkDir);
 	lua_gc(L, LUA_GCRESTART, -1);
 
 	// Setup debug system

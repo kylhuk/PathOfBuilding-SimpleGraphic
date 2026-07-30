@@ -10,15 +10,25 @@ import re
 import sys
 
 
+# SemVer 2.0.0, deliberately without an optional leading "v".  Numeric core
+# identifiers and numeric prerelease identifiers cannot contain leading zeroes;
+# build identifiers are allowed to because build metadata has no precedence.
+SEMVER_PATTERN = re.compile(
+    r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
+    r"(?:-"
+    r"(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
+    r"(?:\.(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*"
+    r")?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--version", required=True)
     parser.add_argument("--root", type=Path, default=Path("."))
     args = parser.parse_args()
-    if not re.fullmatch(
-        r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?",
-        args.version,
-    ):
+    if not SEMVER_PATTERN.fullmatch(args.version):
         print(
             "version must be SemVer without a leading v, for example 2.6.0 or 2.6.0-rc.1+build.5",
             file=sys.stderr,

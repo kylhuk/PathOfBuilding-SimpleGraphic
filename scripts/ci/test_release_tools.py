@@ -115,9 +115,53 @@ def test_prerelease_versions() -> None:
         run([*command, "--version", "2.6.0-rc.1"], expect_success=False)
 
 
+def test_semver_syntax() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        command = [sys.executable, str(ROOT / "scripts/ci/check_release.py"), "--root", str(root)]
+
+        valid_versions = [
+            "0.0.0",
+            "2.6.0",
+            "2.6.0-0",
+            "2.6.0-0A",
+            "2.6.0-rc.1+build.5",
+            "2.6.0+001",
+        ]
+        invalid_versions = [
+            "02.6.0",
+            "2.06.0",
+            "2.6.00",
+            "2.6.0-",
+            "2.6.0-rc.",
+            "2.6.0-.rc",
+            "2.6.0-rc..1",
+            "2.6.0+",
+            "2.6.0+build.",
+            "2.6.0+.build",
+            "2.6.0+build..5",
+            "2.6.0-01",
+            "2.6.0-rc.01",
+            "2.6.0-01+build.5",
+        ]
+
+        for version in valid_versions:
+            numeric_version = version.split("-", 1)[0].split("+", 1)[0]
+            write_release_metadata(root, cmake=numeric_version, config=version, vcpkg=version)
+            run([*command, "--version", version])
+
+        # Keep metadata aligned with each input so an accidental acceptance
+        # cannot be hidden by a later metadata-mismatch failure.
+        for version in invalid_versions:
+            numeric_version = version.split("-", 1)[0].split("+", 1)[0]
+            write_release_metadata(root, cmake=numeric_version, config=version, vcpkg=version)
+            run([*command, "--version", version], expect_success=False)
+
+
 def main() -> int:
     test_manifest_uses_published_asset_names()
     test_prerelease_versions()
+    test_semver_syntax()
     print("release metadata tools are valid")
     return 0
 

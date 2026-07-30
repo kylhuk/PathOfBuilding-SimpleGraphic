@@ -427,10 +427,12 @@ static std::optional<std::vector<std::string>> ParseLegacyArgumentList(const cha
 	std::string current;
 	char quote = '\0';
 	bool escaped = false;
+	bool tokenStarted = false; // Quotes can deliberately create an empty argv entry.
 	for (const unsigned char* cursor = reinterpret_cast<const unsigned char*>(text); *cursor; ++cursor) {
 		const char ch = static_cast<char>(*cursor);
 		if (escaped) {
 			current.push_back(ch);
+			tokenStarted = true;
 			escaped = false;
 			continue;
 		}
@@ -449,21 +451,24 @@ static std::optional<std::vector<std::string>> ParseLegacyArgumentList(const cha
 		}
 		if (ch == '\'' || ch == '\"') {
 			quote = ch;
+			tokenStarted = true;
 			continue;
 		}
 		if (std::isspace(*cursor)) {
-			if (!current.empty()) {
+			if (tokenStarted) {
 				result.push_back(std::move(current));
 				current.clear();
+				tokenStarted = false;
 			}
 			continue;
 		}
 		current.push_back(ch);
+		tokenStarted = true;
 	}
 	if (escaped || quote != '\0') {
 		return {};
 	}
-	if (!current.empty()) {
+	if (tokenStarted) {
 		result.push_back(std::move(current));
 	}
 	return result;

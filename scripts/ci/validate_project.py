@@ -67,6 +67,28 @@ def main() -> int:
             raise RuntimeError("user-path errors do not use portable optional construction")
         if 'Error("%s", threadError);' not in system_main:
             raise RuntimeError("thread errors are passed as an unsafe format string")
+        if (
+            "bool tokenStarted = false;" not in system_main
+            or "if (tokenStarted) {\n\t\t\t\tresult.push_back" not in system_main
+            or "if (tokenStarted) {\n\t\tresult.push_back" not in system_main
+        ):
+            raise RuntimeError("POSIX process launching does not preserve explicitly empty arguments")
+        ui_main = require(ROOT / "ui_main.cpp")
+        if (
+            'root + "/?.lua;" + root + "/?/init.lua"' not in ui_main
+            or "ConfigureLuaScriptSearchPath(L, scriptWorkDir);" not in ui_main
+        ):
+            raise RuntimeError("the selected script directory is not in Lua package.path")
+        subscript = require(ROOT / "ui_subscript.cpp")
+        if (
+            "static void ssWipeCalls(ssCall_s* calls)" not in subscript
+            or subscript.count("ssWipeCalls(calls);") < 2
+            or "std::atomic_size_t luaMemoryKilobytes" not in subscript
+            or "CacheScriptMemory(L);" not in subscript
+            or "return luaMemoryKilobytes.load(std::memory_order_relaxed);" not in subscript
+            or "return running ? 0" in subscript
+        ):
+            raise RuntimeError("subscript abort handling or active Lua memory accounting is incomplete")
         if "sys->Sleep(1);" not in require(ROOT / "engine/render/r_main.cpp"):
             raise RuntimeError("renderer does not use the platform-neutral sleep API")
         # LuaSocket intentionally has both socket.core and mime.core. Their
@@ -108,11 +130,25 @@ def main() -> int:
         if "filename = archive.name" not in release_manifest:
             raise RuntimeError("release metadata does not name flattened release assets")
         check_release = require(ROOT / "scripts/ci/check_release.py")
+        strict_semver_fragments = (
+            r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)",
+            r"(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)",
+            r"(?:\.(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*",
+            r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?",
+        )
         if (
             "numeric_version = args.version.split" not in check_release
-            or "(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?" not in check_release
+            or "SEMVER_PATTERN = re.compile(" not in check_release
+            or "SEMVER_PATTERN.fullmatch(args.version)" not in check_release
+            or any(fragment not in check_release for fragment in strict_semver_fragments)
+            # A nonnumeric prerelease identifier must contain a letter or
+            # hyphen; otherwise values such as "01" could bypass the numeric
+            # leading-zero rule. The + quantifiers reject empty dot segments.
+            or r"[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*" not in check_release
+            or r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?" not in check_release
+            or r"(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?" in check_release
         ):
-            raise RuntimeError("release metadata does not support prerelease version cores")
+            raise RuntimeError("release metadata does not enforce strict SemVer prerelease and build identifiers")
         runtime_dependency_start = cmake.index(
             "install(RUNTIME_DEPENDENCY_SET simplegraphic_runtime_dependencies"
         )
