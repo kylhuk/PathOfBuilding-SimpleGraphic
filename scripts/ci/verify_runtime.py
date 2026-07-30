@@ -57,8 +57,10 @@ def macos_loader_paths(path: Path) -> tuple[list[str], list[str]]:
 
 
 def check_loader_paths(platform: str, files: list[Path]) -> None:
+    if platform == "windows":
+        return
     command = "readelf" if platform == "linux" else "otool"
-    if platform == "windows" or not shutil.which(command):
+    if not shutil.which(command):
         return
     for path in files:
         if platform == "macos":
@@ -73,7 +75,11 @@ def check_loader_paths(platform: str, files: list[Path]) -> None:
             for rpath in rpaths:
                 if rpath.startswith("/"):
                     raise RuntimeError(f"{path} contains a non-relocatable absolute rpath: {rpath}")
-        args = [command, "-d", str(path)] if platform == "linux" else [command, "-l", str(path)]
+            # otool echoes its command-line file path as the first output
+            # line. Do not scan that heading: the intentional temporary copy
+            # lives under the GitHub runner's work directory.
+            continue
+        args = [command, "-d", str(path)]
         result = subprocess.run(args, text=True, capture_output=True, check=False)
         if result.returncode:
             raise RuntimeError(f"could not inspect loader paths for {path}")
