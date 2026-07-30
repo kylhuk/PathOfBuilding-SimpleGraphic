@@ -32,9 +32,8 @@ cat > Makefile.vcpkg <<END_MAKEFILE ;
 COMMON_OPTIONS += 'E=@:' 'Q='
 COMMON_OPTIONS += 'BUILDMODE=${LUAJIT_BUILDMODE}'
 COMMON_OPTIONS += 'PREFIX=${LUAJIT_PREFIX}'
-# Keep LuaJIT's versioned binary name.  Current upstream creates the stable
-# `luajit` symlink from INSTALL_TSYMNAME; forcing both names to `luajit`
-# replaces the binary with a self-referential link during `make install`.
+COMMON_OPTIONS += 'INSTALL_TNAME=luajit'
+COMMON_OPTIONS += 'INSTALL_TSYMNAME=luajit-symlink'
 
 BUILD_OPTIONS += 'CC=${CC}'
 BUILD_OPTIONS += 'CCDEBUG='

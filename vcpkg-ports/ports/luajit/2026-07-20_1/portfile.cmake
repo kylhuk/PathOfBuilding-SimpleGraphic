@@ -107,6 +107,10 @@ file(REMOVE_RECURSE
     "${CURRENT_PACKAGES_DIR}/share/man"
 )
 
+file(REMOVE
+    "${CURRENT_PACKAGES_DIR}/bin/luajit-symlink"
+    "${CURRENT_PACKAGES_DIR}/debug/bin/luajit-symlink"
+)
 vcpkg_copy_tools(TOOL_NAMES luajit AUTO_CLEAN)
 
 # vcpkg_copy_tools stages the executable but not LuaJIT's Lua-side JIT
