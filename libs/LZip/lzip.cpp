@@ -1,11 +1,27 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include <algorithm>
+#include <array>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <limits>
+#include <memory>
+#include <mutex>
+#include <new>
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "zlib.h"
 
-#ifdef _WIN32
+#if !defined(_WIN32)
+#include <sys/types.h>
+#endif
+
+#if defined(_WIN32)
 #define LZIP_EXPORT __declspec(dllexport)
+#elif defined(__GNUC__) || defined(__clang__)
+#define LZIP_EXPORT __attribute__((visibility("default")))
 #else
 #define LZIP_EXPORT
 #endif
@@ -13,723 +29,607 @@
 extern "C" {
 #include "lua.h"
 #include "lauxlib.h"
-#include "lualib.h"
-#include "luajit.h"
 }
 
-typedef unsigned char byte;
-typedef unsigned int dword;
-typedef unsigned long lword;
+namespace {
 
-char* AllocString(char* st)
+constexpr std::uint32_t kLocalHeaderSignature = 0x04034b50U;
+constexpr std::uint16_t kFlagEncrypted = 0x0001U;
+constexpr std::uint16_t kFlagDataDescriptor = 0x0008U;
+constexpr std::uint16_t kMethodStore = 0;
+constexpr std::uint16_t kMethodDeflate = 8;
+constexpr std::size_t kInflateBufferSize = 64 * 1024;
+constexpr std::size_t kMaxLuaReadBytes = 128 * 1024 * 1024;
+constexpr std::size_t kMaxArchiveEntries = 100000;
+constexpr std::uint64_t kMaxArchiveUncompressedBytes = 512ULL * 1024ULL * 1024ULL;
+
+std::uint16_t ReadLE16(const std::uint8_t* bytes)
 {
-	if (st == NULL) {
-		return NULL;
+	return static_cast<std::uint16_t>(bytes[0]) |
+		(static_cast<std::uint16_t>(bytes[1]) << 8);
+}
+
+std::uint32_t ReadLE32(const std::uint8_t* bytes)
+{
+	return static_cast<std::uint32_t>(bytes[0]) |
+		(static_cast<std::uint32_t>(bytes[1]) << 8) |
+		(static_cast<std::uint32_t>(bytes[2]) << 16) |
+		(static_cast<std::uint32_t>(bytes[3]) << 24);
+}
+
+bool AddWouldOverflow(std::uint64_t first, std::uint64_t second)
+{
+	return second > std::numeric_limits<std::uint64_t>::max() - first;
+}
+
+bool FileSeek(FILE* file, std::uint64_t offset)
+{
+#if defined(_WIN32)
+	return _fseeki64(file, static_cast<__int64>(offset), SEEK_SET) == 0;
+#else
+	if (offset > static_cast<std::uint64_t>(std::numeric_limits<off_t>::max())) {
+		return false;
 	}
-
-	int aslen = strlen(st) + 1;
-	char* al = new char[aslen];
-	strcpy(al, st);
-	return al;
+	return fseeko(file, static_cast<off_t>(offset), SEEK_SET) == 0;
+#endif
 }
 
-char* AllocStringLen(int len)
+bool FileSeekToEnd(FILE* file)
 {
-	char* al = new char[len+1];
-	al[len] = 0;
-	return al;
+#if defined(_WIN32)
+	return _fseeki64(file, 0, SEEK_END) == 0;
+#else
+	return fseeko(file, 0, SEEK_END) == 0;
+#endif
 }
 
-void FreeString(char* st)
+std::optional<std::uint64_t> FileTell(FILE* file)
 {
-	if (st) delete st;
+#if defined(_WIN32)
+	const __int64 position = _ftelli64(file);
+#else
+	const off_t position = ftello(file);
+#endif
+	if (position < 0) {
+		return {};
+	}
+	return static_cast<std::uint64_t>(position);
 }
-
-// =============
-// Configuration
-// =============
-
-static const int FS_INFLATE_BUFFER = 65536;
-
-// ==========================
-// Zip File format structures
-// ==========================
-
-#pragma pack(push, 1)
-
-struct zf_cdHeader_s {
-	int		sig;	// 0x02014b50 (50,4B,01,02)
-	short	ver_made;
-	short	ver_ext;
-	short	flag;
-	short	method;
-	short	ftime;
-	short	fdate;
-	int		crc32;
-	lword	szComp;
-	lword	szUcomp;
-	short	szName;
-	short	szExtra;
-	short	szComm;
-	short	nDisk;
-	short	attInt;
-	int		attExt;
-	int		hOffset;
-};
-
-struct zf_localHeader_s {
-	int		sig;	// 0x04034b50 (50,4B,03,04)
-	short	ver_ext;
-	short	flag;
-	short	method;
-	short	ftime;
-	short	fdate;
-	int		crc32;
-	lword	szComp;
-	lword	szUcomp;
-	short	szName;
-	short	szExtra;
-};
-
-struct zf_dataDesc_s {
-	int		crc32;
-	lword	szComp;
-	lword	szUcomp;
-};
-
-struct zf_cdEnd_s {
-	int		sig;	// 0x06054b50 (50,4B,05,06)
-	short	nDisk;
-	short	stDisk;
-	short	noeDisk;
-	short	noeTotal;
-	int		szTotal;
-	int		cdOffset;
-	short	szComm;
-};
-
-#pragma pack(pop)
-
-// =========================
-// Zip File format constants
-// =========================
-
-static const int ZF_MAXVER = 20;
-
-static const int ZF_GPBF_ENC = 0x0001;
-static const int ZF_GPBF_DD  = 0x0008;
-
-static const int ZF_METHOD_STORE = 0;
-static const int ZF_METHOD_DEFLATE = 8;
-
-static const int ZF_SIG_CDHEADER = 0x02014B50;
-static const int ZF_SIG_LOCALHEADER = 0x04034B50;
-static const int ZF_SIG_CDEND = 0x06054B50;
-
-// ===============
-// ZLib Alloc/Free
-// ===============
-
-static void* ZF_Alloc(void* unused, dword num, dword size)
-{
-	return new byte[num*size];
-}
-
-static void ZF_Free(void* unused, void* ptr)
-{
-	delete (byte*)ptr;
-}
-
-// =======
-// Classes
-// =======
 
 struct fs_fileInfo_s {
-	FILE*	f;		// Zip file
-	char*	name;	// Filename
-	int		fo;		// File offset
-	int		szU;	// Uncompressed size
-	int		szC;	// Compressed size, 0 if not compressed
+	std::string name;
+	std::uint64_t dataOffset = 0;
+	std::uint32_t uncompressedSize = 0;
+	std::uint32_t compressedSize = 0;
+	bool deflated = false;
 };
 
-// ================
-// fsInflator class
-// ================
+class fs_zipFile_c {
+public:
+	explicit fs_zipFile_c(const char* filename)
+	{
+		if (!filename || !*filename) {
+			return;
+		}
+		file = std::fopen(filename, "rb");
+		if (!file) {
+			return;
+		}
+		ParseLocalEntries();
+	}
+
+	~fs_zipFile_c()
+	{
+		if (file) {
+			std::fclose(file);
+		}
+	}
+
+	fs_zipFile_c(const fs_zipFile_c&) = delete;
+	fs_zipFile_c& operator=(const fs_zipFile_c&) = delete;
+
+	bool IsOpen() const
+	{
+		return file != nullptr;
+	}
+
+	bool ReadAt(std::uint64_t offset, std::uint8_t* output, std::size_t length)
+	{
+		if (!file || (!output && length != 0)) {
+			return false;
+		}
+		std::lock_guard<std::mutex> lock(fileMutex);
+		if (!FileSeek(file, offset)) {
+			return false;
+		}
+		return std::fread(output, 1, length, file) == length;
+	}
+
+	std::vector<fs_fileInfo_s> files;
+
+private:
+	FILE* file = nullptr;
+	std::mutex fileMutex;
+	std::uint64_t fileSize = 0;
+
+	bool ReadHeaderAt(std::uint64_t offset, std::array<std::uint8_t, 30>& header)
+	{
+		return offset <= fileSize && header.size() <= fileSize - offset && ReadAt(offset, header.data(), header.size());
+	}
+
+	void ParseLocalEntries()
+	{
+		{
+			std::lock_guard<std::mutex> lock(fileMutex);
+			if (!FileSeekToEnd(file)) {
+				return;
+			}
+			const auto length = FileTell(file);
+			if (!length || !FileSeek(file, 0)) {
+				return;
+			}
+			fileSize = *length;
+		}
+
+		std::uint64_t cursor = 0;
+		std::uint64_t totalUncompressedBytes = 0;
+		while (cursor + 30 <= fileSize) {
+			std::array<std::uint8_t, 30> header{};
+			if (!ReadHeaderAt(cursor, header) || ReadLE32(header.data()) != kLocalHeaderSignature) {
+				break;
+			}
+
+			const std::uint16_t flags = ReadLE16(header.data() + 6);
+			const std::uint16_t method = ReadLE16(header.data() + 8);
+			const std::uint32_t compressedSize = ReadLE32(header.data() + 18);
+			const std::uint32_t uncompressedSize = ReadLE32(header.data() + 22);
+			const std::uint16_t nameLength = ReadLE16(header.data() + 26);
+			const std::uint16_t extraLength = ReadLE16(header.data() + 28);
+
+			const std::uint64_t headerEnd = cursor + header.size();
+			if (AddWouldOverflow(headerEnd, nameLength) || AddWouldOverflow(headerEnd + nameLength, extraLength)) {
+				break;
+			}
+			const std::uint64_t dataOffset = headerEnd + nameLength + extraLength;
+			if (dataOffset > fileSize || compressedSize > fileSize - dataOffset) {
+				break;
+			}
+
+			std::string name(nameLength, '\0');
+			if (nameLength && !ReadAt(headerEnd, reinterpret_cast<std::uint8_t*>(name.data()), nameLength)) {
+				break;
+			}
+
+			// Local headers with a trailing data descriptor do not carry reliable
+			// sizes.  The historic reader did not parse the central directory, so
+			// reject them explicitly rather than seeking into arbitrary data.
+			const bool usable = (flags & (kFlagEncrypted | kFlagDataDescriptor)) == 0 &&
+				(method == kMethodStore || method == kMethodDeflate) &&
+				!name.empty() && name.back() != '/' &&
+				uncompressedSize <= static_cast<std::uint32_t>(std::numeric_limits<int>::max()) &&
+				compressedSize <= static_cast<std::uint32_t>(std::numeric_limits<int>::max());
+			if (usable && files.size() < kMaxArchiveEntries &&
+				!AddWouldOverflow(totalUncompressedBytes, uncompressedSize) &&
+				totalUncompressedBytes + uncompressedSize <= kMaxArchiveUncompressedBytes) {
+				files.push_back({ std::move(name), dataOffset, uncompressedSize, compressedSize, method == kMethodDeflate });
+				totalUncompressedBytes += uncompressedSize;
+			}
+			else if (files.size() >= kMaxArchiveEntries ||
+				AddWouldOverflow(totalUncompressedBytes, uncompressedSize) ||
+				totalUncompressedBytes + uncompressedSize > kMaxArchiveUncompressedBytes) {
+				break;
+			}
+
+			const std::uint64_t next = dataOffset + compressedSize;
+			if (next <= cursor) {
+				break;
+			}
+			cursor = next;
+		}
+	}
+};
 
 class fs_inflator_c {
 public:
-	fs_inflator_c(fs_fileInfo_s* i);
-	~fs_inflator_c();
-	int	Inflate(byte* buf, int len);// Inflate
-
-private:
-	int		pC;			// Read pointer
-	byte*	ibuf;		// Input buffer
-	int		ibuflen;	// Input buffer length
-	fs_fileInfo_s* i;	// Info structure
-	z_stream* zst;		// ZLib stream
-
-	void	FillInput();// Fill decompression input
-};
-
-fs_inflator_c::fs_inflator_c(fs_fileInfo_s* info)
-{
-	i = info;
-
-	// Initialise stream
-	zst = new z_stream;
-	memset(zst, 0, sizeof(z_stream));
-	zst->zalloc = ZF_Alloc;
-	zst->zfree = ZF_Free;
-
-	// Initialise decompression input
-	pC = 0;
-	if (i->szC < FS_INFLATE_BUFFER) {
-		ibuflen = i->szC;
-	} else {
-		ibuflen = FS_INFLATE_BUFFER;
-	}
-	ibuf = new byte[ibuflen];
-	FillInput();
-
-	// Start decompressor
-	inflateInit2(zst, -MAX_WBITS);	
-}
-
-fs_inflator_c::~fs_inflator_c()
-{
-	// Stop decompressor
-	inflateEnd(zst);
-
-	// Release stream and input buffer
-	delete ibuf;
-	delete zst;
-}
-
-void fs_inflator_c::FillInput()
-{
-	// Relocate any remaining input
-	int remin = zst->avail_in;
-	if (remin) {
-		memcpy(ibuf, zst->next_in, remin); 
+	fs_inflator_c(std::shared_ptr<fs_zipFile_c> archive, const fs_fileInfo_s& info)
+		: archive(std::move(archive)), info(info), compressedRemaining(info.compressedSize)
+	{
+		std::memset(&stream, 0, sizeof(stream));
+		initialised = inflateInit2(&stream, -MAX_WBITS) == Z_OK;
 	}
 
-	// Get reading amount
-	int rdmax = ibuflen - remin;
-	int rd = i->szC - pC;
-	if (rd > rdmax) {
-		rd = rdmax;
-	}
-
-	// Read into buffer
-	if (rd) {
-		fseek(i->f, i->fo + pC, SEEK_SET);
-		fread(ibuf + remin, rd, 1, i->f);
-	}
-
-	// Update stream
-	zst->next_in = ibuf;
-	zst->avail_in+= rd;
-	pC+= rd;
-}
-
-int fs_inflator_c::Inflate(byte* out, int len)
-{
-	// Prepare stream
-	zst->next_out = out;
-	zst->avail_out = len;
-
-	while (1) {
-		// Decompress some data
-		int r = inflate(zst, Z_SYNC_FLUSH);
-
-		switch (r) {
-		case Z_OK:	
-			// Progress made, check if we're done
-			if (zst->avail_out == 0) {
-				return len;
-			}
-			break;
-		case Z_BUF_ERROR:
-			// No progress made, so give it more input
-			FillInput();
-			break;
-		default:
-			// We got an error
-		case Z_STREAM_END:
-			// Reached the end of the stream
-			return len - zst->avail_out;
+	~fs_inflator_c()
+	{
+		if (initialised) {
+			inflateEnd(&stream);
 		}
 	}
-}
 
-// =============
-// fsFile class
-// =============
+	int Inflate(std::uint8_t* output, int length)
+	{
+		if (!initialised || failed || finished || !output || length <= 0) {
+			return 0;
+		}
 
-enum vf_state_e {
-	VF_OPEN	=0x01,	// Open
-	VF_SEEK	=0x04	// Seek enabled
+		stream.next_out = output;
+		stream.avail_out = static_cast<uInt>(length);
+		while (stream.avail_out != 0) {
+			if (stream.avail_in == 0 && !FillInput()) {
+				if (!finished) {
+					failed = true;
+				}
+				break;
+			}
+			const uInt beforeIn = stream.avail_in;
+			const uInt beforeOut = stream.avail_out;
+			const int result = inflate(&stream, Z_NO_FLUSH);
+			if (result == Z_STREAM_END) {
+				finished = true;
+				break;
+			}
+			if (result != Z_OK) {
+				failed = true;
+				break;
+			}
+			if (stream.avail_in == beforeIn && stream.avail_out == beforeOut) {
+				failed = true;
+				break;
+			}
+		}
+		return length - static_cast<int>(stream.avail_out);
+	}
+
+private:
+	std::shared_ptr<fs_zipFile_c> archive;
+	const fs_fileInfo_s& info;
+	std::array<std::uint8_t, kInflateBufferSize> input{};
+	z_stream stream{};
+	std::uint64_t compressedOffset = 0;
+	std::uint64_t compressedRemaining = 0;
+	bool initialised = false;
+	bool finished = false;
+	bool failed = false;
+
+	bool FillInput()
+	{
+		if (stream.avail_in != 0 || compressedRemaining == 0) {
+			return stream.avail_in != 0;
+		}
+		const std::size_t readSize = static_cast<std::size_t>(std::min<std::uint64_t>(input.size(), compressedRemaining));
+		if (!archive->ReadAt(info.dataOffset + compressedOffset, input.data(), readSize)) {
+			failed = true;
+			return false;
+		}
+		compressedOffset += readSize;
+		compressedRemaining -= readSize;
+		stream.next_in = input.data();
+		stream.avail_in = static_cast<uInt>(readSize);
+		return true;
+	}
 };
 
 class fs_file_c {
 public:
-	fs_file_c(fs_fileInfo_s* i);
-	~fs_file_c();
-	void	Seek(int pos, int mode);	// Seek
-	int		Read(byte* buf, int len);	// Read data
-	int		Length();					// Return the file length
-	int		Tell();						// Return the read pointer
-
-private:
-	fs_fileInfo_s* i;	// Info structure
-	int		pU;			// Read pointer
-	fs_inflator_c* inf;	// Inflator
-};
-
-fs_file_c::fs_file_c(fs_fileInfo_s* info)
-{
-	i = info;
-
-	// Create inflator
-	if (i->szC) {
-		inf = new fs_inflator_c(i);
-	} else {
-		inf = NULL;
-	}
-	
-	// Set position
-	pU = 0;
-}
-
-fs_file_c::~fs_file_c()
-{
-	delete inf;
-}
-
-void fs_file_c::Seek(int pos, int mode)
-{
-	int seekto;
-
-	switch (mode) {
-	case SEEK_SET:
-		seekto = pos;
-		break;
-	case SEEK_CUR:
-		seekto = pU + pos;
-		break;
-	case SEEK_END:
-		seekto = i->szU - pos;
-		break;
-	default:
-		return;
-	}
-
-	if (i->szC) {
-		int diff = seekto - pU;
-		if (diff > 0) {
-			// Seek forward
-			byte* sk = new byte[diff];
-			Read(sk, diff);
-			delete[] sk;
-		} else if (diff < 0) {
-			// Restart reading
-			pU = 0;
-			// Recreate inflator
-			delete inf;
-			inf = new fs_inflator_c(i);
-			if (seekto) {
-				// Seek forward
-				byte* sk = new byte[seekto];
-				Read(sk, seekto);
-				delete[] sk;
-			}
-		}
-	} else {
-		pU = seekto;
-		if (pU < 0) {
-			pU = 0;
-		} else if (pU > i->szU) {
-			pU = i->szU;
+	fs_file_c(std::shared_ptr<fs_zipFile_c> archive, std::size_t fileIndex)
+		: archive(std::move(archive)), info(&this->archive->files.at(fileIndex))
+	{
+		if (info->deflated) {
+			inflator = std::make_unique<fs_inflator_c>(this->archive, *info);
 		}
 	}
-}
 
-int fs_file_c::Read(byte* out, int len)
-{
-	// Determine read length
-	int rp = len + pU;
-	if (rp > i->szU) len = i->szU - pU;
-	if (len == 0) {
-		return 0;
-	}
+	void Seek(int position, int mode)
+	{
+		std::int64_t target = 0;
+		switch (mode) {
+		case SEEK_SET: target = position; break;
+		case SEEK_CUR: target = static_cast<std::int64_t>(readPosition) + position; break;
+		case SEEK_END: target = static_cast<std::int64_t>(info->uncompressedSize) - position; break;
+		default: return;
+		}
+		target = std::clamp<std::int64_t>(target, 0, info->uncompressedSize);
 
-	if (i->szC) {
-		// Decompress
-		len = inf->Inflate(out, len);
-	} else {
-		// Raw read
-		fseek(i->f, i->fo + pU, SEEK_SET);
-		len = fread(out, 1, len, i->f);
-	}
-
-	pU+= len;
-	return len;
-}
-
-int fs_file_c::Length()
-{
-	return i->szU;
-}
-
-int fs_file_c::Tell()
-{
-	return pU;
-}
-
-// =============
-// zipFile class
-// =============
-
-class fs_zipFile_c {
-public:
-	fs_zipFile_c(const char* zname);
-	~fs_zipFile_c();
-
-	int		numFiles;
-	fs_fileInfo_s** files;
-private:
-	FILE*	zf;				// File handle
-	int		filesSz;
-
-	int		GetSignature();	// Get next signature
-};
-
-int fs_zipFile_c::GetSignature()
-{
-	int sig = 0;
-	if (fread(&sig, 4, 1, zf) == 0) {
-		return 0;
-	}
-	fseek(zf, -4, SEEK_CUR);
-	return sig;
-}
-
-fs_zipFile_c::fs_zipFile_c(const char* zname)
-{
-	numFiles = 0;
-	filesSz = 32;
-	files = new fs_fileInfo_s*[filesSz];
-
-	int sig;
-
-	// Open and lock file
-	zf = fopen(zname, "rb");
-	if (zf == NULL) {
-		return;
-	}
-
-	// Check signature
-	sig = GetSignature();
-	if (strncmp((char*)&sig, "Rar", 3) == 0) {
-		fclose(zf);
-		return;
-	}
-
-	// Read local headers
-	while (sig == ZF_SIG_LOCALHEADER) {
-		zf_localHeader_s lh;
-		if (fread(&lh, sizeof(lh), 1, zf) == 0) {
-			fclose(zf);
+		if (!info->deflated) {
+			readPosition = static_cast<std::uint32_t>(target);
 			return;
 		}
-
-		if (lh.szName) {
-			// Read filename
-			char* fname = AllocStringLen(lh.szName);
-			fread(fname, lh.szName, 1, zf); 
-
-			// Add it in if it is a file
-			if (fname[lh.szName-1] != '/') {
-				// Fill in info
-				fs_fileInfo_s* fi = new fs_fileInfo_s;
-				fi->f = zf;
-				fi->name = fname;
-				fi->fo = ftell(zf) + lh.szExtra;
-				fi->szU = lh.szUcomp;
-				fi->szC = (lh.method == ZF_METHOD_DEFLATE)? lh.szComp : 0;
-
-				// Record file
-				if (numFiles == filesSz) {
-					filesSz<<= 1;
-					files = (fs_fileInfo_s**)realloc(files, sizeof(fs_fileInfo_s*)*filesSz);
-				}
-				files[numFiles++] = fi;
-			} else {
-				FreeString(fname);
-			}
-			
-			// Skip the extra information and file data
-			fseek(zf, lh.szExtra + lh.szComp, SEEK_CUR);
+		if (target < readPosition) {
+			inflator = std::make_unique<fs_inflator_c>(archive, *info);
+			readPosition = 0;
 		}
-
-		sig = GetSignature();
-	}
-}
-
-fs_zipFile_c::~fs_zipFile_c()
-{
-	fclose(zf);
-	for (int f = 0; f < numFiles; f++) {
-		delete files[f]->name;
-		delete files[f];
-	}
-	delete files;
-}
-
-// =============
-// Lua Interface
-// =============
-
-static int IsUserData(lua_State* L, int index, const char* metaName)
-{
-	if (lua_type(L, index) != LUA_TUSERDATA || lua_getmetatable(L, index) == 0) {
-		return 0;
-	}
-	lua_getfield(L, lua_upvalueindex(1), metaName);
-	int ret = lua_rawequal(L, -2, -1);
-	lua_pop(L, 2);
-	return ret;
-}
-
-struct lzip_s {
-	fs_zipFile_c* zipFile;
-};
-static lzip_s* GetZip(lua_State* L, const char* method, bool valid)
-{
-	if ( !IsUserData(L, 1, "zipMeta") ) {
-		luaL_error(L, "zip:%s() must be used on a zip handle", method);
-	}
-	lzip_s* lz = (lzip_s*)lua_touserdata(L, 1);
-	lua_remove(L, 1);
-	if (valid && lz->zipFile == NULL) {
-		luaL_error(L, "zip:%s(): zip handle is closed");
-	}
-	return lz;
-}
-
-struct lzipFile_s {
-	fs_file_c* file;
-};
-static lzipFile_s* GetZipFile(lua_State* L, const char* method, bool valid)
-{
-	if ( !IsUserData(L, 1, "zipFileMeta") ) {
-		luaL_error(L, "zipFile:%s() must be used on a zip file handle", method);
-	}
-	lzipFile_s* lzf = (lzipFile_s*)lua_touserdata(L, 1);
-	lua_remove(L, 1);
-	if (valid && lzf->file == NULL) {
-		luaL_error(L, "zipFile:%s(): zip file handle is closed");
-	}
-	return lzf;
-}
-
-static int l_open(lua_State* L)
-{
-	int n = lua_gettop(L);
-	if (n < 1 || !lua_isstring(L, 1)) {
-		luaL_error(L, "Usage: lzip.open(fileName)");
-	}
-	fs_zipFile_c* zipFile = new fs_zipFile_c(lua_tostring(L, 1));
-	if (zipFile->numFiles == 0) {
-		delete zipFile;
-		return 0;
-	}
-	lzip_s* lz = (lzip_s*)lua_newuserdata(L, sizeof(lzip_s));
-	lz->zipFile = zipFile;
-	lua_pushvalue(L, lua_upvalueindex(2));
-	lua_setmetatable(L, -2);
-	return 1;
-}
-
-static int l_zip_Close(lua_State* L)
-{
-	lzip_s* lz = GetZip(L, "Closea", false);
-	delete lz->zipFile;
-	lz->zipFile = NULL;
-	return 0;
-}
-
-static int l_zip_GetNumFiles(lua_State* L)
-{
-	lzip_s* lz = GetZip(L, "GetNumFiles", true);
-	lua_pushinteger(L, lz->zipFile->numFiles);
-	return 1;
-}
-
-static int l_zip_GetFileName(lua_State* L)
-{
-	lzip_s* lz = GetZip(L, "GetFileName", true);
-	int n = lua_gettop(L);
-	if (n < 1 || !lua_isnumber(L, 1)) {
-		luaL_error(L, "Usage: zip:GetFileName(index)");
-	}
-	int index = lua_tointeger(L, 1);
-	if (index < 1 || index > lz->zipFile->numFiles) {
-		return 0;
-	}
-	lua_pushstring(L, lz->zipFile->files[index - 1]->name);
-	return 1;
-}
-
-static int l_zip_GetFileSize(lua_State* L)
-{
-	lzip_s* lz = GetZip(L, "GetFileSize", true);
-	int n = lua_gettop(L);
-	if (n < 1 || !lua_isnumber(L, 1)) {
-		luaL_error(L, "Usage: zip:GetFileSize(index)");
-	}
-	int index = lua_tointeger(L, 1);
-	if (index < 1 || index > lz->zipFile->numFiles) {
-		return 0;
-	}
-	lua_pushinteger(L, lz->zipFile->files[index - 1]->szU);
-	return 1;
-}
-
-static int l_zip_OpenFile(lua_State* L)
-{
-	lzip_s* lz = GetZip(L, "OpenFile", true);
-	int n = lua_gettop(L);
-	if (n < 1 || !(lua_isnumber(L, 1) || lua_isstring(L, 1))) {
-		luaL_error(L, "Usage: zip:OpenFile(index) or zip:OpenFile(fileName)");
-	}
-	fs_fileInfo_s* i = NULL;
-	if (lua_isnumber(L, 1)) {
-		int index = lua_tointeger(L, 1);
-		if (index < 1 || index > lz->zipFile->numFiles) {
-			luaL_error(L, "zip:OpenFile(): invalid index");
-		}
-		i = lz->zipFile->files[index - 1];
-	} else {
-		const char* name = lua_tostring(L, 1);
-		for (int index = 0; index < lz->zipFile->numFiles; index++) {
-			if ( !strcmp(name, lz->zipFile->files[index]->name) ) {
-				i = lz->zipFile->files[index];
+		std::array<std::uint8_t, 4096> discard{};
+		while (readPosition < target) {
+			const int wanted = static_cast<int>(std::min<std::int64_t>(discard.size(), target - readPosition));
+			if (Read(discard.data(), wanted) == 0) {
 				break;
 			}
 		}
-		if ( !i ) {
+	}
+
+	int Read(std::uint8_t* output, int length)
+	{
+		if (!output || length <= 0 || readPosition >= info->uncompressedSize) {
 			return 0;
 		}
+		const int requested = std::min<int>(length, static_cast<int>(info->uncompressedSize - readPosition));
+		int actual = 0;
+		if (info->deflated) {
+			actual = inflator ? inflator->Inflate(output, requested) : 0;
+		}
+		else if (archive->ReadAt(info->dataOffset + readPosition, output, requested)) {
+			actual = requested;
+		}
+		readPosition += static_cast<std::uint32_t>(actual);
+		return actual;
 	}
-	fs_file_c* file = new fs_file_c(i);
-	lzipFile_s* lzf = (lzipFile_s*)lua_newuserdata(L, sizeof(lzipFile_s));
-	lzf->file = file;
-	lua_pushvalue(L, lua_upvalueindex(2));
-	lua_setmetatable(L, -2);
+
+	int Length() const { return static_cast<int>(info->uncompressedSize); }
+	int Tell() const { return static_cast<int>(readPosition); }
+
+private:
+	std::shared_ptr<fs_zipFile_c> archive;
+	const fs_fileInfo_s* info = nullptr;
+	std::uint32_t readPosition = 0;
+	std::unique_ptr<fs_inflator_c> inflator;
+};
+
+struct lzip_s {
+	std::shared_ptr<fs_zipFile_c> zipFile;
+};
+
+struct lzipFile_s {
+	std::shared_ptr<fs_file_c> file;
+};
+
+int IsUserData(lua_State* state, int index, const char* metaName)
+{
+	if (lua_type(state, index) != LUA_TUSERDATA || lua_getmetatable(state, index) == 0) {
+		return 0;
+	}
+	lua_getfield(state, lua_upvalueindex(1), metaName);
+	const int result = lua_rawequal(state, -2, -1);
+	lua_pop(state, 2);
+	return result;
+}
+
+lzip_s* GetZip(lua_State* state, const char* method, bool valid)
+{
+	if (!IsUserData(state, 1, "zipMeta")) {
+		luaL_error(state, "zip:%s() must be used on a zip handle", method);
+	}
+	auto* zip = static_cast<lzip_s*>(lua_touserdata(state, 1));
+	lua_remove(state, 1);
+	if (valid && !zip->zipFile) {
+		luaL_error(state, "zip:%s(): zip handle is closed", method);
+	}
+	return zip;
+}
+
+lzipFile_s* GetZipFile(lua_State* state, const char* method, bool valid)
+{
+	if (!IsUserData(state, 1, "zipFileMeta")) {
+		luaL_error(state, "zipFile:%s() must be used on a zip file handle", method);
+	}
+	auto* zipFile = static_cast<lzipFile_s*>(lua_touserdata(state, 1));
+	lua_remove(state, 1);
+	if (valid && !zipFile->file) {
+		luaL_error(state, "zipFile:%s(): zip file handle is closed", method);
+	}
+	return zipFile;
+}
+
+int l_open(lua_State* state)
+{
+	if (lua_gettop(state) < 1 || !lua_isstring(state, 1)) {
+		return luaL_error(state, "Usage: lzip.open(fileName)");
+	}
+	auto archive = std::make_shared<fs_zipFile_c>(lua_tostring(state, 1));
+	if (!archive->IsOpen() || archive->files.empty()) {
+		return 0;
+	}
+	auto* zip = new (lua_newuserdata(state, sizeof(lzip_s))) lzip_s{ std::move(archive) };
+	(void)zip;
+	lua_pushvalue(state, lua_upvalueindex(2));
+	lua_setmetatable(state, -2);
 	return 1;
 }
 
-static int l_zipFile_Close(lua_State* L)
+int l_zip_Close(lua_State* state)
 {
-	lzipFile_s* lzf = GetZipFile(L, "Close", false);
-	delete lzf->file;
-	lzf->file = NULL;
+	auto* zip = GetZip(state, "Close", false);
+	zip->zipFile.reset();
 	return 0;
 }
 
-static int l_zipFile_Read(lua_State* L)
+int l_zip_GC(lua_State* state)
 {
-	lzipFile_s* lzf = GetZipFile(L, "Read", true);
-	int n = lua_gettop(L);
-	if (n < 1) {
-		luaL_error(L, "Usage: zipFile:Read(count) or zipFile:read(\"*a\")");
+	auto* zip = static_cast<lzip_s*>(lua_touserdata(state, 1));
+	if (zip) {
+		zip->~lzip_s();
 	}
-	int count;
-	if (lua_isnumber(L, 1)) {
-		count = lua_tointeger(L, 1);
-	} else {
-		if ( !strcmp(lua_tostring(L, 1), "*a") ) {
-			count = lzf->file->Length() - lzf->file->Tell();
-		} else {
-			luaL_error(L, "zipFile:Read(): unrecognised format: %s", lua_tostring(L, 1));
+	return 0;
+}
+
+int l_zip_GetNumFiles(lua_State* state)
+{
+	auto* zip = GetZip(state, "GetNumFiles", true);
+	lua_pushinteger(state, static_cast<lua_Integer>(zip->zipFile->files.size()));
+	return 1;
+}
+
+int l_zip_GetFileName(lua_State* state)
+{
+	auto* zip = GetZip(state, "GetFileName", true);
+	if (lua_gettop(state) < 1 || !lua_isnumber(state, 1)) {
+		return luaL_error(state, "Usage: zip:GetFileName(index)");
+	}
+	const lua_Integer index = lua_tointeger(state, 1);
+	if (index < 1 || static_cast<std::size_t>(index) > zip->zipFile->files.size()) {
+		return 0;
+	}
+	lua_pushstring(state, zip->zipFile->files[static_cast<std::size_t>(index - 1)].name.c_str());
+	return 1;
+}
+
+int l_zip_GetFileSize(lua_State* state)
+{
+	auto* zip = GetZip(state, "GetFileSize", true);
+	if (lua_gettop(state) < 1 || !lua_isnumber(state, 1)) {
+		return luaL_error(state, "Usage: zip:GetFileSize(index)");
+	}
+	const lua_Integer index = lua_tointeger(state, 1);
+	if (index < 1 || static_cast<std::size_t>(index) > zip->zipFile->files.size()) {
+		return 0;
+	}
+	lua_pushinteger(state, zip->zipFile->files[static_cast<std::size_t>(index - 1)].uncompressedSize);
+	return 1;
+}
+
+int l_zip_OpenFile(lua_State* state)
+{
+	auto* zip = GetZip(state, "OpenFile", true);
+	if (lua_gettop(state) < 1 || !(lua_isnumber(state, 1) || lua_isstring(state, 1))) {
+		return luaL_error(state, "Usage: zip:OpenFile(index) or zip:OpenFile(fileName)");
+	}
+
+	std::size_t index = zip->zipFile->files.size();
+	if (lua_isnumber(state, 1)) {
+		const lua_Integer inputIndex = lua_tointeger(state, 1);
+		if (inputIndex < 1 || static_cast<std::size_t>(inputIndex) > zip->zipFile->files.size()) {
+			return luaL_error(state, "zip:OpenFile(): invalid index");
+		}
+		index = static_cast<std::size_t>(inputIndex - 1);
+	}
+	else {
+		const char* name = lua_tostring(state, 1);
+		for (std::size_t candidate = 0; candidate < zip->zipFile->files.size(); ++candidate) {
+			if (zip->zipFile->files[candidate].name == name) {
+				index = candidate;
+				break;
+			}
+		}
+		if (index == zip->zipFile->files.size()) {
+			return 0;
 		}
 	}
-	if (count < 1) {
-		lua_pushstring(L, "");
+
+	auto file = std::make_shared<fs_file_c>(zip->zipFile, index);
+	auto* zipFile = new (lua_newuserdata(state, sizeof(lzipFile_s))) lzipFile_s{ std::move(file) };
+	(void)zipFile;
+	lua_pushvalue(state, lua_upvalueindex(2));
+	lua_setmetatable(state, -2);
+	return 1;
+}
+
+int l_zipFile_Close(lua_State* state)
+{
+	auto* zipFile = GetZipFile(state, "Close", false);
+	zipFile->file.reset();
+	return 0;
+}
+
+int l_zipFile_GC(lua_State* state)
+{
+	auto* zipFile = static_cast<lzipFile_s*>(lua_touserdata(state, 1));
+	if (zipFile) {
+		zipFile->~lzipFile_s();
+	}
+	return 0;
+}
+
+int l_zipFile_Read(lua_State* state)
+{
+	auto* zipFile = GetZipFile(state, "Read", true);
+	if (lua_gettop(state) < 1) {
+		return luaL_error(state, "Usage: zipFile:Read(count) or zipFile:Read(\"*a\")");
+	}
+
+	lua_Integer count = 0;
+	if (lua_isnumber(state, 1)) {
+		count = lua_tointeger(state, 1);
+	}
+	else if (lua_isstring(state, 1) && std::strcmp(lua_tostring(state, 1), "*a") == 0) {
+		count = zipFile->file->Length() - zipFile->file->Tell();
+	}
+	else {
+		return luaL_error(state, "zipFile:Read(): unrecognised format");
+	}
+
+	if (count <= 0) {
+		lua_pushliteral(state, "");
 		return 1;
 	}
-	byte* buf = new byte[count];
-	lzf->file->Read(buf, count);
-	lua_pushlstring(L, (char*)buf, count);
+	if (static_cast<std::uint64_t>(count) > kMaxLuaReadBytes) {
+		return luaL_error(state, "zipFile:Read(): requested read exceeds the %u MiB safety limit", static_cast<unsigned>(kMaxLuaReadBytes / (1024 * 1024)));
+	}
+	std::vector<std::uint8_t> buffer(static_cast<std::size_t>(count));
+	const int actual = zipFile->file->Read(buffer.data(), static_cast<int>(count));
+	lua_pushlstring(state, reinterpret_cast<const char*>(buffer.data()), static_cast<std::size_t>(actual));
 	return 1;
 }
 
-static int l_zipFile_Length(lua_State* L)
+int l_zipFile_Length(lua_State* state)
 {
-	lzipFile_s* lzf = GetZipFile(L, "Read", true);
-	lua_pushinteger(L, lzf->file->Length());
+	auto* zipFile = GetZipFile(state, "Length", true);
+	lua_pushinteger(state, zipFile->file->Length());
 	return 1;
 }
 
-extern "C" LZIP_EXPORT int luaopen_lzip(lua_State* L)
+} // namespace
+
+extern "C" LZIP_EXPORT int luaopen_lzip(lua_State* state)
 {
-	lua_settop(L, 0);
-	lua_newtable(L); // Library table
-	lua_newtable(L); // Zip metatable
-	lua_newtable(L); // Zip file metatable
+	lua_settop(state, 0);
+	lua_newtable(state); // library table
+	lua_newtable(state); // zip metatable
+	lua_newtable(state); // zip file metatable
 
-	lua_pushvalue(L, 2);
-	lua_setfield(L, 1, "zipMeta");
-	lua_pushvalue(L, 2);
-	lua_setfield(L, 2, "__index");
+	lua_pushvalue(state, 2);
+	lua_setfield(state, 1, "zipMeta");
+	lua_pushvalue(state, 2);
+	lua_setfield(state, 2, "__index");
 
-	lua_pushvalue(L, 3);
-	lua_setfield(L, 1, "zipFileMeta");
-	lua_pushvalue(L, 3);
-	lua_setfield(L, 3, "__index");
+	lua_pushvalue(state, 3);
+	lua_setfield(state, 1, "zipFileMeta");
+	lua_pushvalue(state, 3);
+	lua_setfield(state, 3, "__index");
 
-	lua_pushvalue(L, 1);
-	lua_pushvalue(L, 2);
-	lua_pushcclosure(L, l_open, 2);
-	lua_setfield(L, 1, "open");
+	lua_pushvalue(state, 1);
+	lua_pushvalue(state, 2);
+	lua_pushcclosure(state, l_open, 2);
+	lua_setfield(state, 1, "open");
 
-	lua_pushvalue(L, 1);
-	lua_pushcclosure(L, l_zip_Close, 1);
-	lua_setfield(L, 2, "__gc");
-	lua_pushvalue(L, 1);
-	lua_pushcclosure(L, l_zip_Close, 1);
-	lua_setfield(L, 2, "Close");
-	lua_pushvalue(L, 1);
-	lua_pushcclosure(L, l_zip_GetNumFiles, 1);
-	lua_setfield(L, 2, "GetNumFiles");
-	lua_pushvalue(L, 1);
-	lua_pushcclosure(L, l_zip_GetFileName, 1);
-	lua_setfield(L, 2, "GetFileName");
-	lua_pushvalue(L, 1);
-	lua_pushcclosure(L, l_zip_GetFileSize, 1);
-	lua_setfield(L, 2, "GetFileSize");
-	lua_pushvalue(L, 1);
-	lua_pushvalue(L, 3);
-	lua_pushcclosure(L, l_zip_OpenFile, 2);
-	lua_setfield(L, 2, "OpenFile");
+	lua_pushcfunction(state, l_zip_GC);
+	lua_setfield(state, 2, "__gc");
+	lua_pushvalue(state, 1);
+	lua_pushcclosure(state, l_zip_Close, 1);
+	lua_setfield(state, 2, "Close");
+	lua_pushvalue(state, 1);
+	lua_pushcclosure(state, l_zip_GetNumFiles, 1);
+	lua_setfield(state, 2, "GetNumFiles");
+	lua_pushvalue(state, 1);
+	lua_pushcclosure(state, l_zip_GetFileName, 1);
+	lua_setfield(state, 2, "GetFileName");
+	lua_pushvalue(state, 1);
+	lua_pushcclosure(state, l_zip_GetFileSize, 1);
+	lua_setfield(state, 2, "GetFileSize");
+	lua_pushvalue(state, 1);
+	lua_pushvalue(state, 3);
+	lua_pushcclosure(state, l_zip_OpenFile, 2);
+	lua_setfield(state, 2, "OpenFile");
 
-	lua_pushvalue(L, 1);
-	lua_pushcclosure(L, l_zipFile_Close, 1);
-	lua_setfield(L, 3, "__gc");
-	lua_pushvalue(L, 1);
-	lua_pushcclosure(L, l_zipFile_Close, 1);
-	lua_setfield(L, 3, "Close");
-	lua_pushvalue(L, 1);
-	lua_pushcclosure(L, l_zipFile_Read, 1);
-	lua_setfield(L, 3, "Read");
-	lua_pushvalue(L, 1);
-	lua_pushcclosure(L, l_zipFile_Length, 1);
-	lua_setfield(L, 3, "Length");
+	lua_pushcfunction(state, l_zipFile_GC);
+	lua_setfield(state, 3, "__gc");
+	lua_pushvalue(state, 1);
+	lua_pushcclosure(state, l_zipFile_Close, 1);
+	lua_setfield(state, 3, "Close");
+	lua_pushvalue(state, 1);
+	lua_pushcclosure(state, l_zipFile_Read, 1);
+	lua_setfield(state, 3, "Read");
+	lua_pushvalue(state, 1);
+	lua_pushcclosure(state, l_zipFile_Length, 1);
+	lua_setfield(state, 3, "Length");
 
-	// Pop metatables
-	lua_pop(L, 2);
-
+	lua_pop(state, 2);
 	return 1;
 }

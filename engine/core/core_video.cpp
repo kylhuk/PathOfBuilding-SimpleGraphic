@@ -37,7 +37,7 @@ static const int vid_modeList[VID_NUMMODES][2] = {
 class core_video_c: public core_IVideo, public conCmdHandler_c {
 public: 
 	// Interface
-	void	Apply(bool shown = true);
+	bool	Apply(bool shown = true);
 	void	Save();
 
 	// Encapsulated
@@ -80,7 +80,7 @@ core_video_c::core_video_c(sys_IMain* sysHnd)
 // Video Manager
 // =============
 
-void core_video_c::Apply(bool shown)
+bool core_video_c::Apply(bool shown)
 {
 	// Apply video settings
 	sys_vidSet_s set;
@@ -91,10 +91,12 @@ void core_video_c::Apply(bool shown)
 		if (vid_resizable->intVal == 2) {
 			set.flags|= VID_MAXIMIZE;
 		} else if (vid_resizable->intVal == 3) {
-			if (sscanf(vid_last->strVal.c_str(), "%d,%d,%d,%d,%d", set.save.size + 0, set.save.size + 1, set.save.pos + 0, set.save.pos + 1, (int*)&set.save.maximised) == 5) {
+			int maximised = 0;
+			if (sscanf(vid_last->strVal.c_str(), "%d,%d,%d,%d,%d", set.save.size + 0, set.save.size + 1, set.save.pos + 0, set.save.pos + 1, &maximised) == 5) {
 				// Clamp saved window size as it may be persisted as zero before.
 				set.save.size[0] = (std::max)(CFG_VID_MINWIDTH, set.save.size[0]);
 				set.save.size[1] = (std::max)(CFG_VID_MINHEIGHT, set.save.size[1]);
+				set.save.maximised = maximised != 0;
 				set.flags|= VID_USESAVED;
 			} else {
 				set.flags|= VID_MAXIMIZE;
@@ -110,7 +112,7 @@ void core_video_c::Apply(bool shown)
 	}
 	set.minSize[0] = CFG_VID_MINWIDTH;
 	set.minSize[1] = CFG_VID_MINHEIGHT;
-	sys->video->Apply(&set);
+	return sys->video->Apply(&set) != 0;
 }
 
 void core_video_c::Save()
@@ -118,7 +120,7 @@ void core_video_c::Save()
 	// Save video size/pos if needed
 	if (vid_resizable->intVal == 3) {
 		char spec[64];
-		sprintf(spec, "%d,%d,%d,%d,%d", sys->video->vid.size[0], sys->video->vid.size[1], sys->video->vid.pos[0], sys->video->vid.pos[1], sys->video->vid.maximised);
+		snprintf(spec, sizeof(spec), "%d,%d,%d,%d,%d", sys->video->vid.size[0], sys->video->vid.size[1], sys->video->vid.pos[0], sys->video->vid.pos[1], sys->video->vid.maximised ? 1 : 0);
 		vid_last->Set(spec);
 	}
 }

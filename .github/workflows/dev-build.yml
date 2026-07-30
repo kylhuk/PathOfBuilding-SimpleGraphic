@@ -1,0 +1,24 @@
+name: Development runtime builds
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: development-runtime-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    uses: ./.github/workflows/build-runtime.yml
+    with:
+      source_ref: ${{ github.sha }}
+      artifact_prefix: dev-${{ github.sha }}
+      retention_days: 14

@@ -380,6 +380,8 @@ index 00000000..72e9ccae
 +#include <stdbool.h>
 +#include <stddef.h>
 +#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
 +
 +#ifdef _WIN32
 +bool _lua_narrowtobuffer(wchar_t const* srcPtr, char* dstBuf, int dstSize);
@@ -393,7 +395,15 @@ index 00000000..72e9ccae
 +char* _lua_tmpnam();
 +#else
 +#define _lua_fopen(path, mode) fopen(path, mode)
-+#define _lua_getenvcopy(name) strdup(getenv(name))
++static inline char const* _lua_getenvcopy(char const* name)
++{
++  char const* value = name ? getenv(name) : NULL;
++  if (!value) return NULL;
++  size_t const length = strlen(value) + 1;
++  char* copy = (char*)malloc(length);
++  if (copy) memcpy(copy, value, length);
++  return copy;
++}
 +#define _lua_getenvfree(name) free(name)
 +#define _lua_remove(path) remove(path)
 +#define _lua_rename(oldpath, newpath) rename(oldpath, newpath)
@@ -402,56 +412,3 @@ index 00000000..72e9ccae
 +#endif
 +
 +#endif
-diff --git a/src/msvcbuild.bat.rej b/src/msvcbuild.bat.rej
-new file mode 100644
-index 00000000..4263730b
---- /dev/null
-+++ b/src/msvcbuild.bat.rej
-@@ -0,0 +1,47 @@
-+diff a/src/msvcbuild.bat b/src/msvcbuild.bat	(rejected hunks)
-+@@ -13,9 +13,9 @@
-+ 
-+ @setlocal
-+ @rem Add more debug flags here, e.g. DEBUGCFLAGS=/DLUA_USE_APICHECK
-+-@set DEBUGCFLAGS=
-+-@set LJCOMPILE=cl /nologo /c /O2 /W3 /D_CRT_SECURE_NO_DEPRECATE /D_CRT_STDIO_INLINE=__declspec(dllexport)__inline
-+-@set LJLINK=link /nologo
-++@set DEBUGCFLAGS=/Od
-++@set LJCOMPILE=cl /nologo /c /O2 /W3 /D_CRT_SECURE_NO_DEPRECATE /D_CRT_STDIO_INLINE=__declspec(dllexport)__inline /Z7 /GL
-++@set LJLINK=link /nologo /LTCG
-+ @set LJMT=mt /nologo
-+ @set LJLIB=lib /nologo /nodefaultlib
-+ @set DASMDIR=..\dynasm
-+@@ -67,14 +67,13 @@ buildvm -m folddef -o lj_folddef.h lj_opt_fold.c
-+ @if "%1" neq "debug" goto :NODEBUG
-+ @shift
-+ @set BUILDTYPE=debug
-+-@set LJCOMPILE=%LJCOMPILE% /Zi %DEBUGCFLAGS%
-++@set LJCOMPILE=%LJCOMPILE% /Z7 %DEBUGCFLAGS%
-+ :NODEBUG
-+-@set LJLINK=%LJLINK% /%BUILDTYPE%
-+ @if "%1"=="amalg" goto :AMALGDLL
-+ @if "%1"=="static" goto :STATIC
-+-%LJCOMPILE% /MD /DLUA_BUILD_AS_DLL lj_*.c lib_*.c
-++%LJCOMPILE% /MD /DLUA_BUILD_AS_DLL lj_*.c lib_*.c /Fdlua51.pdb
-+ @if errorlevel 1 goto :BAD
-+-%LJLINK% /DLL /out:%LJDLLNAME% lj_*.obj lib_*.obj
-++%LJLINK% /DLL /out:%LJDLLNAME% lj_*.obj lib_*.obj /DEBUG /OPT:ICF /OPT:REF
-+ @if errorlevel 1 goto :BAD
-+ @goto :MTDLL
-+ :STATIC
-+@@ -92,7 +91,7 @@ buildvm -m folddef -o lj_folddef.h lj_opt_fold.c
-+ if exist %LJDLLNAME%.manifest^
-+   %LJMT% -manifest %LJDLLNAME%.manifest -outputresource:%LJDLLNAME%;2
-+ 
-+-%LJCOMPILE% luajit.c
-++%LJCOMPILE% luajit.c /Fdluajit.pdb
-+ @if errorlevel 1 goto :BAD
-+ %LJLINK% /out:luajit.exe luajit.obj %LJLIBNAME%
-+ @if errorlevel 1 goto :BAD
-+@@ -114,4 +113,5 @@ if exist luajit.exe.manifest^
-+ @goto :END
-+ :FAIL
-+ @echo You must open a "Visual Studio Command Prompt" to run this script
-++exit 1
-+ :END

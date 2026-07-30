@@ -1,0 +1,280 @@
+name: Build runtime matrix
+
+on:
+  workflow_call:
+    inputs:
+      source_ref:
+        description: Immutable revision to build.
+        required: true
+        type: string
+      artifact_prefix:
+        description: Prefix used for the per-platform runtime archives.
+        required: true
+        type: string
+      retention_days:
+        description: GitHub artifact retention period.
+        required: false
+        default: 14
+        type: number
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  native:
+    name: ${{ matrix.id }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: windows-x86
+            os: windows-2022
+            family: windows
+            architecture: Win32
+            triplet: x86-windows
+            archive: zip
+          - id: windows-x64
+            os: windows-2022
+            family: windows
+            architecture: x64
+            triplet: x64-windows
+            archive: zip
+          - id: windows-arm64
+            os: windows-11-arm
+            family: windows
+            architecture: ARM64
+            triplet: arm64-windows
+            archive: zip
+          - id: macos-x64
+            os: macos-15-intel
+            family: macos
+            architecture: x86_64
+            triplet: x64-osx-dynamic
+            archive: tar.gz
+          - id: macos-arm64
+            os: macos-15
+            family: macos
+            architecture: arm64
+            triplet: arm64-osx-dynamic
+            archive: tar.gz
+          - id: linux-x64
+            os: ubuntu-24.04
+            family: linux
+            architecture: x86_64
+            triplet: x64-linux-dynamic
+            archive: tar.gz
+          - id: linux-arm64
+            os: ubuntu-24.04-arm
+            family: linux
+            architecture: aarch64
+            triplet: arm64-linux-dynamic
+            archive: tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_ref }}
+          submodules: recursive
+
+      - name: Set up MSBuild
+        if: matrix.family == 'windows'
+        uses: microsoft/setup-msbuild@30375c66a4eea26614e0d39710365f22f8b0af57 # v3.0.0
+
+      - name: Bootstrap vcpkg
+        shell: pwsh
+        if: matrix.family == 'windows'
+        run: .\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+
+      - name: Build, test, stage, and package
+        shell: pwsh
+        if: matrix.family == 'windows'
+        env:
+          VCPKG_DISABLE_METRICS: '1'
+        run: |
+          $build = "$env:GITHUB_WORKSPACE/out/build/${{ matrix.id }}"
+          $stage = "$env:GITHUB_WORKSPACE/out/stage/${{ matrix.id }}"
+          $archive = "$env:GITHUB_WORKSPACE/out/artifacts/PathOfBuilding-SimpleGraphic-${{ matrix.id }}.zip"
+          cmake -S . -B $build -G "Visual Studio 17 2022" -A "${{ matrix.architecture }}" `
+            -DCMAKE_INSTALL_PREFIX=$stage `
+            -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} `
+            -DVCPKG_OVERLAY_TRIPLETS="$env:GITHUB_WORKSPACE/vcpkg-triplets" `
+            -DSIMPLEGRAPHIC_BUILD_TESTS=ON
+          cmake --build $build --config Release --parallel
+          ctest --test-dir $build -C Release --output-on-failure
+          cmake --install $build --config Release
+          python scripts/ci/verify_runtime.py --runtime $stage --platform windows
+          python scripts/ci/package_runtime.py --runtime $stage --output $archive --format zip --name "PathOfBuilding-SimpleGraphic-${{ matrix.id }}"
+
+      - name: Bootstrap vcpkg
+        shell: bash
+        if: matrix.family != 'windows'
+        run: ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
+
+      - name: Install Linux graphics build prerequisites
+        if: matrix.family == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1-mesa-dev libgl1-mesa-dev \
+            libglu1-mesa-dev mesa-common-dev \
+            libxcursor-dev libxi-dev libxinerama-dev libxrandr-dev libx11-dev \
+            pkg-config xorg-dev
+
+      - name: Build, test, stage, and package
+        shell: bash
+        if: matrix.family != 'windows'
+        env:
+          VCPKG_DISABLE_METRICS: '1'
+        run: |
+          set -euo pipefail
+          build="$GITHUB_WORKSPACE/out/build/${{ matrix.id }}"
+          stage="$GITHUB_WORKSPACE/out/stage/${{ matrix.id }}"
+          archive="$GITHUB_WORKSPACE/out/artifacts/PathOfBuilding-SimpleGraphic-${{ matrix.id }}.tar.gz"
+          cmake -S . -B "$build" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES="${{ matrix.architecture }}" \
+            -DCMAKE_INSTALL_PREFIX="$stage" \
+            -DVCPKG_TARGET_TRIPLET="${{ matrix.triplet }}" \
+            -DVCPKG_OVERLAY_TRIPLETS="$GITHUB_WORKSPACE/vcpkg-triplets" \
+            -DSIMPLEGRAPHIC_BUILD_TESTS=ON
+          cmake --build "$build" --parallel
+          ctest --test-dir "$build" --output-on-failure
+          cmake --install "$build"
+          python3 scripts/ci/verify_runtime.py --runtime "$stage" --platform "${{ matrix.family }}"
+          python3 scripts/ci/package_runtime.py --runtime "$stage" --output "$archive" --format tar.gz --name "PathOfBuilding-SimpleGraphic-${{ matrix.id }}"
+
+      - name: Upload runtime archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ inputs.artifact_prefix }}-${{ matrix.id }}
+          path: out/artifacts/PathOfBuilding-SimpleGraphic-${{ matrix.id }}.${{ matrix.archive }}
+          if-no-files-found: error
+          retention-days: ${{ inputs.retention_days }}
+
+  linux-x86:
+    name: linux-x86
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_ref }}
+          submodules: recursive
+
+      - name: Build in a native 32-bit Linux container
+        env:
+          VCPKG_DISABLE_METRICS: '1'
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/src" \
+            --workdir /src \
+            --env VCPKG_DISABLE_METRICS \
+            --env DEBIAN_FRONTEND=noninteractive \
+            i386/ubuntu:24.04 \
+            bash -lc '
+              set -euo pipefail
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                build-essential ca-certificates cmake curl git ninja-build \
+                libegl1-mesa-dev libgl1-mesa-dev libglu1-mesa-dev mesa-common-dev \
+                libxcursor-dev libxi-dev libxinerama-dev libxrandr-dev libx11-dev \
+                pkg-config python3 tar unzip xorg-dev zip
+              # The bind mount is owned by the GitHub runner user while this
+              # disposable container runs as root. vcpkg consults its Git
+              # registry, so make both repositories explicitly trustworthy.
+              git config --global --add safe.directory /src
+              git config --global --add safe.directory /src/vcpkg
+              ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
+              cmake -S . -B out/build/linux-x86 -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_INSTALL_PREFIX=/src/out/stage/linux-x86 \
+                -DVCPKG_TARGET_TRIPLET=x86-linux-dynamic \
+                -DVCPKG_OVERLAY_TRIPLETS=/src/vcpkg-triplets \
+                -DSIMPLEGRAPHIC_BUILD_TESTS=ON
+              cmake --build out/build/linux-x86 --parallel
+              ctest --test-dir out/build/linux-x86 --output-on-failure
+              cmake --install out/build/linux-x86
+              python3 scripts/ci/verify_runtime.py --runtime /src/out/stage/linux-x86 --platform linux
+              python3 scripts/ci/package_runtime.py \
+                --runtime /src/out/stage/linux-x86 \
+                --output /src/out/artifacts/PathOfBuilding-SimpleGraphic-linux-x86.tar.gz \
+                --format tar.gz \
+                --name PathOfBuilding-SimpleGraphic-linux-x86
+            '
+
+      - name: Upload runtime archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ inputs.artifact_prefix }}-linux-x86
+          path: out/artifacts/PathOfBuilding-SimpleGraphic-linux-x86.tar.gz
+          if-no-files-found: error
+          retention-days: ${{ inputs.retention_days }}
+
+  windows10-smoke:
+    name: Windows 10 ${{ matrix.id }} package smoke test
+    needs: native
+    # GitHub-hosted runners do not provide Windows 10. Repositories that have
+    # a Windows 10 self-hosted runner opt in with this repository variable.
+    if: vars.ENABLE_WINDOWS10_SMOKE == 'true'
+    runs-on: [self-hosted, Windows, Windows-10, X64]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: windows-x86
+          - id: windows-x64
+    steps:
+      - name: Download the runtime artifact
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $artifact = "${{ inputs.artifact_prefix }}-${{ matrix.id }}"
+          gh run download $env:GITHUB_RUN_ID --name $artifact --dir runtime-artifact
+          $archive = Get-ChildItem runtime-artifact -Recurse -Filter '*.zip' | Select-Object -First 1
+          if ($null -eq $archive) { throw "Could not find $artifact" }
+          Expand-Archive -Path $archive.FullName -DestinationPath runtime -Force
+
+      - name: Exercise the staged Windows 10 runtime
+        shell: pwsh
+        run: |
+          $host = Get-ChildItem runtime -Recurse -Filter 'PathOfBuilding-SimpleGraphic.exe' | Select-Object -First 1
+          if ($null -eq $host) { throw 'Runtime host executable is missing' }
+          & $host.FullName --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $host.FullName --smoke-modules
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  windows10-arm64-smoke:
+    name: Windows 10 ARM64 package smoke test
+    needs: native
+    # This separate opt-in permits repositories with an ARM64 Windows 10
+    # runner to verify the same binary that is produced on Windows 11 ARM.
+    if: vars.ENABLE_WINDOWS10_ARM64_SMOKE == 'true'
+    runs-on: [self-hosted, Windows, Windows-10, ARM64]
+    steps:
+      - name: Download the ARM64 runtime artifact
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $artifact = "${{ inputs.artifact_prefix }}-windows-arm64"
+          gh run download $env:GITHUB_RUN_ID --name $artifact --dir runtime-artifact
+          $archive = Get-ChildItem runtime-artifact -Recurse -Filter '*.zip' | Select-Object -First 1
+          if ($null -eq $archive) { throw "Could not find $artifact" }
+          Expand-Archive -Path $archive.FullName -DestinationPath runtime -Force
+
+      - name: Exercise the staged Windows 10 ARM64 runtime
+        shell: pwsh
+        run: |
+          $host = Get-ChildItem runtime -Recurse -Filter 'PathOfBuilding-SimpleGraphic.exe' | Select-Object -First 1
+          if ($null -eq $host) { throw 'Runtime host executable is missing' }
+          & $host.FullName --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $host.FullName --smoke-modules
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

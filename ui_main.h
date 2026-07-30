@@ -9,6 +9,7 @@
 // =======
 
 struct ui_expectationFailed_s {};
+#include "lua_runtime.h"
 
 // UI Manager
 class ui_main_c: public ui_IMain {

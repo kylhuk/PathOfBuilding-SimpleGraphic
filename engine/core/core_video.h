@@ -14,6 +14,7 @@ public:
 	static core_IVideo* GetHandle(sys_IMain* sysHnd);
 	static void FreeHandle(core_IVideo* hnd);
 
-	virtual void	Apply(bool shown = true) = 0;
+	// Returns true when the platform window could not be applied.
+	virtual bool	Apply(bool shown = true) = 0;
 	virtual void	Save() = 0;
 };

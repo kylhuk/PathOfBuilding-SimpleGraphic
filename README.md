@@ -1,46 +1,122 @@
-# Path of Building Community SimpleGraphic.dll
+# Path of Building Community SimpleGraphic
 
 ## Introduction
 
-`SimpleGraphic.dll` is the host environment for Lua.
+`SimpleGraphic` is the host environment for Lua.
 It contains the API used by the application's Lua logic, as well as a
 2D OpenGL ES 2.0 renderer, window management, input handling, and a
 debug console.
-It exports one symbol, `RunLuaFileAsWin`, which is passed a
+It retains the historic `RunLuaFileAsWin` C ABI, which is passed a
 C-style argc/argv argument list, with the script path as `argv[0]`.
 
-The Windows-specific code is contained in 5 files:
-- `win\entry.cpp`: Contains the DLL export
-It just creates the system main module, and runs it
-- `engine\system\win\sys_main.cpp`: The system main module.
-It initialises the application, and contains generic OS interface functions,
-such as input and clipboard handling
-- `engine\system\win\sys_console.cpp`: Manages the debug console window that
-appears during the program's initialisation
-- `engine\system\win\sys_video.cpp`: Creates and manages the main program window
-- `engine\system\win\sys_opengl.cpp`: Initialises OpenGL
+The installed payload is self-contained: the host executable, `SimpleGraphic`
+library, Lua modules, and non-system shared-library dependencies are staged
+together. `PathOfBuilding-SimpleGraphic --smoke-modules` performs a GUI-free
+load test of every shipped native Lua module.
+
+## Supported targets
+
+| Operating system | x86 | x64 / AMD64 | ARMv8 / ARM64 |
+| --- | :---: | :---: | :---: |
+| Windows 10 | ✓ | ✓ | ✓ |
+| Windows 11 | ✓ | ✓ | ✓ |
+| Linux | ✓ | ✓ | ✓ |
+| macOS | — | ✓ | ✓ |
+
+Windows 10 and 11 use the same supported MSVC runtime family. GitHub does not
+offer a Windows 10 hosted image, so opt-in self-hosted Windows 10 smoke jobs
+are included for maintainers who set `ENABLE_WINDOWS10_SMOKE=true` (x64/x86
+compatibility) and/or `ENABLE_WINDOWS10_ARM64_SMOKE=true` (native ARM64).
+The matching self-hosted runners need the GitHub CLI (`gh`) available on
+`PATH`; the jobs use it to retrieve their just-built artifact.
 
 ## Building
 
-`SimpleGraphic.dll` is currently built using Visual Studio 2022 for 64-bit.
+Initialize the checked-in dependency sources first:
 
-The DLL depends on a number of 3rd-party libraries, all provided either as
-direct submodules and built by the main `CMakeLists.txt` file or built from
-ports in the `vcpkg` submodule as part of the build process.
+```sh
+git submodule update --init --recursive
+```
 
-The build process will also build the `lcurl` and `lzip` Lua extensions
-against the same LuaJIT version as the DLL is built with.
+Install CMake 3.24+, Ninja (or Visual Studio 2022 on Windows), Python 3, and
+the normal build tools for the target platform. The first configure invokes the
+bundled vcpkg manifest using its committed baseline, so no global vcpkg setup
+is required.
 
-A short guide on building and debugging the DLL is available in
-[CONTRIBUTING.md](CONTRIBUTING.md).
+The CMake presets describe every shipped architecture:
 
-The `INSTALL` target will deploy the DLL, its dependencies and the VC++
-runtime to the installation directory.
+```sh
+cmake --preset linux-x64
+cmake --build --preset linux-x64
+ctest --preset linux-x64
+cmake --install out/build/linux-x64
+```
 
-## Debugging
+Replace `linux-x64` with one of:
 
-Since SimpleGraphic.dll is dynamically loaded by `PathOfBuilding.exe`,
-to debug it, run `PathOfBuilding.exe` and then attach to that process using the
+```text
+linux-x86       linux-x64       linux-arm64
+macos-x64       macos-arm64
+windows-x86     windows-x64     windows-arm64
+```
+
+For `linux-x86` on a 64-bit Debian/Ubuntu host, install the 32-bit compiler
+and C library headers first (`gcc-multilib g++-multilib libc6-dev-i386`), or
+use the native i386 container recipe in the build workflow.
+
+Windows presets use the Visual Studio generator. For example:
+
+```powershell
+cmake --preset windows-x64
+cmake --build --preset windows-x64 --config Release
+ctest --preset windows-x64 -C Release
+cmake --install out/build/windows-x64 --config Release
+```
+
+Unix packages deliberately use the checked-in `*-dynamic` vcpkg triplets:
+this guarantees that the executable and every Lua extension share one dynamic
+LuaJIT runtime. Do not replace those triplets with static LuaJIT variants.
+
+The `INSTALL` target creates a ready-to-package runtime directory. Its
+contents can be copied directly into an installer payload; no build directory
+or vcpkg installation is needed at runtime. Run this before packaging:
+
+```sh
+./out/stage/linux-x64/PathOfBuilding-SimpleGraphic --version
+./out/stage/linux-x64/PathOfBuilding-SimpleGraphic --smoke-modules
+```
+
+On Windows, use the `.exe` suffix.
+
+### CI and releases
+
+The repository uses four workflows:
+
+- **Validate source** runs on pull requests and `master` updates.
+- **Development runtime builds** runs automatically for every pull request and
+  `master` push, and can be manually dispatched. It uploads eight
+  installer-ready artifacts for 14 days.
+- **Build runtime matrix** is the shared implementation for development and
+  release builds. It builds Windows x86/x64/ARM64, macOS x64/ARM64, and Linux
+  x86/x64/ARM64, then runs the staged Lua-module smoke test.
+- **Publish release** has no automatic trigger. A maintainer manually enters a
+  SemVer version; the workflow verifies that the selected revision is the
+  current `master` tip, builds all eight packages, produces SHA-256 checksums,
+  and creates the GitHub release.
+
+Release archives contain one top-level directory named for their target,
+which makes them safe inputs to setup/installer tooling. The release includes
+`SHA256SUMS.txt` and `release-manifest.json` for automated packagers.
+
+Dependency and GitHub Action updates are tracked weekly by Dependabot. The
+vcpkg baseline and custom LuaJIT port are pinned so that each source revision
+still resolves reproducibly.
+
+### Debugging
+
+On Windows, `SimpleGraphic.dll` remains dynamically loadable by
+`PathOfBuilding.exe`. To debug that integration, run `PathOfBuilding.exe` and
+then attach to that process using the
 "Debug" > "Attach to Process..." menu option in Visual Studio.
 
 Visual Studio can also be configured to start the Path of Building executable
@@ -52,22 +128,24 @@ Runtime and utilities:
 * [LuaJIT](https://github.com/LuaJIT/LuaJIT) - fast Lua fork with JIT compilation that has diverged from upstream Lua at version 5.1
 * [curl](https://curl.se/) - very common HTTP library, exposed to Lua
 * [fmtlib](https://fmt.dev/) - modern string formatting
-* [libsodium](https://doc.libsodium.org/) - friendly cryptographic primitives, used in SimpleGraphic for fast hashing
+* [Microsoft GSL](https://github.com/microsoft/GSL) - bounds-aware utility types
 * [pkgconf](http://pkgconf.org/) - part of the build process to locate builds of bundled libraries
 * [re2](https://github.com/google/re2) - regex library
+* [sol2](https://github.com/ThePhD/sol2) - C++ bindings for Lua
 
 Graphics:
 * [GLFW](https://www.glfw.org/) - multi-platform windowing library for OpenGL (and other APIs)
 * [ANGLE](https://github.com/google/angle) - OpenGL ES runtime from Google built on top of native rendering APIs
 * [Glad 2](https://gen.glad.sh/) - OpenGL header generator
+* [GLM](https://github.com/g-truc/glm) - graphics mathematics
+* [Dear ImGui](https://github.com/ocornut/imgui) - debug and editor user interface
 
 Compression and image formats:
 * [stb](https://github.com/nothings/stb) - single-header libraries for many things, here image reading and writing
-* [giflib](https://sourceforge.net/projects/giflib/) - GIF loading/saving
-* [libjpeg-turbo](https://libjpeg-turbo.org/) - JPEG loading/saving
-* [libpng](http://www.libpng.org/pub/png/libpng.html) - PNG loading/saving
-* [liblzma](https://tukaani.org/xz/) - LZMA compression/decompression
+* [Compressonator](https://github.com/GPUOpen-Tools/compressonator) - GPU texture compression helpers
+* [libwebp](https://chromium.googlesource.com/webm/libwebp/) - WebP decoding
 * [zlib](https://www.zlib.net/) - zlib compression/decompression
+* [zstd](https://facebook.github.io/zstd/) - Zstandard compression/decompression
 
 ## Licence
 

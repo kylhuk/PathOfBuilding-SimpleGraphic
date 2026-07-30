@@ -4,6 +4,7 @@
 // System Main Header
 //
 
+#include <chrono>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -19,7 +20,7 @@ public:
 	void	Start();
 	int		Get();
 private:
-	std::chrono::system_clock::time_point startTime;
+	std::chrono::steady_clock::time_point startTime;
 };
 
 // Thread

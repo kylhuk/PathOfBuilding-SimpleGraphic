@@ -232,7 +232,7 @@ void sys_console_c::SetVisible(bool show)
 			std::u32string u32_text = IndexUTF8ToUTF32(buffer).text;
 
 			Print(u32_text);
-			delete buffer;
+			FreeString(buffer);
 	
 			RunMessages(hwMain);
 		}

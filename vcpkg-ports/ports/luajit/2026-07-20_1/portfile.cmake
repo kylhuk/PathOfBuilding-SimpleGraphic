@@ -20,9 +20,9 @@ vcpkg_cmake_get_vars(cmake_vars_file)
 include("${cmake_vars_file}")
 
 if(VCPKG_DETECTED_MSVC)
-    # Due to lack of better MSVC cross-build support, just always build the host
-    # minilua tool with the target toolchain. This will work for native builds and
-    # for targeting x86 from x64 hosts. (UWP and ARM64 is unsupported.)
+    # LuaJIT's current msvcbuild.bat selects ARM64 from VSCMD_ARG_TGT_ARCH and
+    # supports both native ARM64 and x64-to-ARM64 developer prompts.  Keep the
+    # target environment intact instead of rejecting arm64-windows in metadata.
     vcpkg_list(SET options)
     set(PKGCONFIG_CFLAGS "")
     if (VCPKG_LIBRARY_LINKAGE STREQUAL "static")

@@ -121,7 +121,7 @@ r_font_c::~r_font_c()
 		delete fontHeights[i]->tex;
 		delete fontHeights[i];
 	}
-	delete fontHeightMap;
+	delete[] fontHeightMap;
 }
 
 // =============

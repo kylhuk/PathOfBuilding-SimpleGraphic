@@ -15,24 +15,31 @@
 #ifdef _WIN32
 #include <eh.h>
 #include <Shlobj.h>
-#elif __linux__
+#elif defined(__linux__) || defined(__APPLE__)
 #include <unistd.h>
 #include <limits.h>
-#elif __APPLE__ && __MACH__
+#include <spawn.h>
+#include <sys/wait.h>
+#if __APPLE__ && __MACH__
 #include <libproc.h>
+#endif
 #endif
 
 #ifndef _WIN32
 #include <sys/types.h>
 #include <pwd.h>
-#include <uuid/uuid.h>
+extern char** environ;
 #endif
 
 #include <GLFW/glfw3.h>
+#include <cctype>
+#include <cerrno>
+#include <cstring>
 #include <filesystem>
 #include <map>
 #include <set>
 #include <thread>
+#include <vector>
 
 #include <fmt/core.h>
 
@@ -57,12 +64,12 @@ timer_c::timer_c()
 
 void timer_c::Start()
 {
-	startTime = std::chrono::system_clock::now();
+	startTime = std::chrono::steady_clock::now();
 }
 
 int timer_c::Get()
 {
-	auto curTime = std::chrono::system_clock::now();
+	auto curTime = std::chrono::steady_clock::now();
 	return (int)std::chrono::duration_cast<std::chrono::milliseconds>(curTime - startTime).count();
 }
 
@@ -362,7 +369,7 @@ char sys_main_c::GlfwKeyExtraChar(int key) {
 
 int sys_main_c::GetTime()
 {
-	auto curTime = std::chrono::system_clock::now();
+	auto curTime = std::chrono::steady_clock::now();
 	return (int)std::chrono::duration_cast<std::chrono::milliseconds>(curTime - baseTime).count();
 }
 
@@ -386,7 +393,8 @@ void sys_main_c::ClipboardCopy(const char* str)
 
 char* sys_main_c::ClipboardPaste()
 {
-	return AllocString(glfwGetClipboardString(nullptr));
+	const char* clipboardText = glfwGetClipboardString(nullptr);
+	return AllocString(clipboardText ? clipboardText : "");
 }
 
 bool sys_main_c::SetWorkDir(std::filesystem::path const& newCwd)
@@ -397,7 +405,7 @@ bool sys_main_c::SetWorkDir(std::filesystem::path const& newCwd)
 	};
 #else
 	auto changeDir = [](std::filesystem::path const& p) {
-		return _chdir(p.c_str());
+		return ::chdir(p.c_str());
 	};
 #endif
 	if (newCwd.empty()) {
@@ -406,6 +414,92 @@ bool sys_main_c::SetWorkDir(std::filesystem::path const& newCwd)
 		return changeDir(newCwd) != 0;
 	}
 }
+
+#ifndef _WIN32
+static std::optional<std::vector<std::string>> ParseLegacyArgumentList(const char* text)
+{
+	std::vector<std::string> result;
+	if (!text) {
+		return result;
+	}
+
+	std::string current;
+	char quote = '\0';
+	bool escaped = false;
+	for (const unsigned char* cursor = reinterpret_cast<const unsigned char*>(text); *cursor; ++cursor) {
+		const char ch = static_cast<char>(*cursor);
+		if (escaped) {
+			current.push_back(ch);
+			escaped = false;
+			continue;
+		}
+		if (ch == '\\') {
+			escaped = true;
+			continue;
+		}
+		if (quote != '\0') {
+			if (ch == quote) {
+				quote = '\0';
+			}
+			else {
+				current.push_back(ch);
+			}
+			continue;
+		}
+		if (ch == '\'' || ch == '\"') {
+			quote = ch;
+			continue;
+		}
+		if (std::isspace(*cursor)) {
+			if (!current.empty()) {
+				result.push_back(std::move(current));
+				current.clear();
+			}
+			continue;
+		}
+		current.push_back(ch);
+	}
+	if (escaped || quote != '\0') {
+		return {};
+	}
+	if (!current.empty()) {
+		result.push_back(std::move(current));
+	}
+	return result;
+}
+
+static std::optional<std::string> SpawnDetached(std::filesystem::path const& command, std::vector<std::string> arguments)
+{
+	arguments.insert(arguments.begin(), command.string());
+	std::vector<char*> argv;
+	argv.reserve(arguments.size() + 1);
+	for (std::string& argument : arguments) {
+		argv.push_back(argument.data());
+	}
+	argv.push_back(nullptr);
+
+	pid_t child{};
+	const int error = posix_spawnp(&child, command.c_str(), nullptr, nullptr, argv.data(), environ);
+	if (error != 0) {
+		return fmt::format("could not start '{}': {}", command.generic_u8string(), std::strerror(error));
+	}
+	std::thread([child] {
+		int status{};
+		while (waitpid(child, &status, 0) == -1 && errno == EINTR) {
+		}
+	}).detach();
+	return {};
+}
+
+static std::optional<std::string> SpawnDetached(std::filesystem::path const& command, const char* argList)
+{
+	auto parsedArgs = ParseLegacyArgumentList(argList);
+	if (!parsedArgs) {
+		return "could not start process: malformed quoted argument list";
+	}
+	return SpawnDetached(command, std::move(*parsedArgs));
+}
+#endif
 
 void sys_main_c::SpawnProcess(std::filesystem::path cmdName, const char* argList)
 {
@@ -429,8 +523,9 @@ void sys_main_c::SpawnProcess(std::filesystem::path cmdName, const char* argList
 	}
 	FreeWideString(wideArgs);
 #else
-#warning LV: Subprocesses not implemented on this OS.
-	// TODO(LV): Implement subprocesses for other OSes.
+	if (auto error = SpawnDetached(cmdName, argList)) {
+		con->Warning("%s", error->c_str());
+	}
 #endif
 }
 
@@ -457,6 +552,9 @@ std::string GetWineHostVersion()
 #if _WIN32 || __linux__
 const char* PlatformOpenURL(const char* url)
 {
+	if (!url || !*url) {
+		return AllocString("Did not open URL: the URL is empty.");
+	}
 #ifdef _WIN32
 	const std::string wineHost = GetWineHostVersion();
 	/*
@@ -465,12 +563,16 @@ const char* PlatformOpenURL(const char* url)
 	*/
 	if ((wineHost == "Linux" || wineHost == "Darwin") && strlen(url) > 1500)
 		return AllocString("Did not open URL, length likely too long for the OS.");
-	ShellExecuteA(NULL, "open", url, NULL, NULL, SW_SHOWDEFAULT);
+	const auto launchResult = reinterpret_cast<intptr_t>(ShellExecuteA(nullptr, "open", url, nullptr, nullptr, SW_SHOWDEFAULT));
+	if (launchResult <= 32) {
+		return AllocString(fmt::format("Did not open URL: ShellExecute error {}.", launchResult).c_str());
+	}
 	return nullptr;
 #else
-#warning LV: URL opening not implemented on this OS.
-	// TODO(LV): Implement URL opening for other OSes.
-	return AllocString("URL opening not implemented on this OS.");
+	if (auto error = SpawnDetached("xdg-open", std::vector<std::string>{ url })) {
+		return AllocString(error->c_str());
+	}
+	return nullptr;
 #endif
 }
 #else
@@ -557,6 +659,12 @@ void sys_main_c::Restart()
 
 std::filesystem::path FindBasePath()
 {
+	if (const char* runtimeDir = std::getenv("SIMPLEGRAPHIC_RUNTIME_DIR"); runtimeDir && *runtimeDir) {
+		std::error_code ec;
+		auto configuredPath = std::filesystem::weakly_canonical(std::filesystem::u8path(runtimeDir), ec);
+		return ec ? std::filesystem::u8path(runtimeDir) : configuredPath;
+	}
+
 	std::filesystem::path progPath;
 #ifdef _WIN32
 	std::vector<wchar_t> basePath(1u << 16);
@@ -575,7 +683,12 @@ std::filesystem::path FindBasePath()
 	proc_pidpath(pid, basePath, sizeof(basePath));
 	progPath = basePath;
 #endif
-	progPath = weakly_canonical(progPath);
+	std::error_code ec;
+	progPath = std::filesystem::weakly_canonical(progPath, ec);
+	if (ec || progPath.empty()) {
+		progPath = std::filesystem::current_path(ec);
+		return ec ? std::filesystem::path{} : progPath;
+	}
 	return progPath.parent_path();
 }
 
@@ -594,6 +707,11 @@ std::tuple<std::optional<std::filesystem::path>, std::optional<std::string>> Fin
 	std::filesystem::path path(pathStr);
 	return { weakly_canonical(path), {} };
 #else
+#if __APPLE__ && __MACH__
+	if (char const* homePath = std::getenv("HOME")) {
+		return { std::filesystem::path(homePath) / "Library/Application Support", {} };
+	}
+#endif
 	if (char const* data_home_path = getenv("XDG_DATA_HOME")) {
 		return { data_home_path, {} };
 	}
@@ -602,18 +720,32 @@ std::tuple<std::optional<std::filesystem::path>, std::optional<std::string>> Fin
 	}
 	uid_t uid = getuid();
 	struct passwd *pw = getpwuid(uid);
+	if (!pw || !pw->pw_dir) {
+		return { {}, "Could not obtain a user data path from the operating system" };
+	}
 	return { std::filesystem::path(pw->pw_dir) / ".local/share", {} };
+#endif
+}
+
+static const char* CurrentArchitectureName()
+{
+#if defined(_M_IX86) || defined(__i386__)
+	return "x86";
+#elif defined(_M_X64) || defined(__x86_64__)
+	return "x64";
+#elif defined(_M_ARM64) || defined(__aarch64__)
+	return "arm64";
+#elif defined(_M_ARM) || defined(__arm__)
+	return "arm";
+#else
+	return "unknown";
 #endif
 }
 
 sys_main_c::sys_main_c()
 	: heldKeyState(KEY_SCROLL + 1, (uint8_t)0)
 {
-#ifdef _WIN64
-	x64 = true;
-#else
-	x64 = false;
-#endif
+	x64 = sizeof(void*) == 8;
 #ifdef _DEBUG
 	debug = true;
 #else
@@ -639,7 +771,7 @@ bool sys_main_c::Run(int argc, char** argv)
 	exitMsg = NULL;
 	threadError = NULL;
 	errorRaised = false;
-	baseTime = std::chrono::system_clock::now();
+	baseTime = std::chrono::steady_clock::now();
 
 	SetWorkDir();
 
@@ -650,7 +782,7 @@ bool sys_main_c::Run(int argc, char** argv)
 	core = core_IMain::GetHandle(this);
 
 	// Print some handy information
-	con->Printf(CFG_VERSION" %s %s, built " __DATE__ "\n", x64? "x64":"x86", debug? "Debug":"Release");
+	con->Printf(CFG_VERSION" %s %s, built " __DATE__ "\n", CurrentArchitectureName(), debug? "Debug":"Release");
 	if (debuggerRunning) {
 		con->Printf("Debugger is present.\n");
 	}
@@ -678,6 +810,10 @@ bool sys_main_c::Run(int argc, char** argv)
 				glfwPollEvents();
 			}
 			auto wnd = (GLFWwindow*)video->GetWindowHandle();
+			if (!wnd) {
+				Exit("Graphics window initialisation failed.");
+				break;
+			}
 			if (glfwWindowShouldClose(wnd)) {
 				Exit();
 				break;
@@ -710,7 +846,7 @@ bool sys_main_c::Run(int argc, char** argv)
 	}
 #else
 	catch (std::exception& e) {
-		Error("Exception: ", e.what());
+		Error("Exception: %s", e.what());
 	}
 #endif
 

@@ -14,8 +14,9 @@
 #include <array>
 #include <filesystem>
 #include <fmt/chrono.h>
-#include <future>
+#include <limits>
 #include <map>
+#include <new>
 #include <numeric>
 #include <random>
 #include <sstream>
@@ -62,7 +63,7 @@ r_shader_c::r_shader_c(r_renderer_c* renderer, std::string_view shname, int flag
 	nameHash = StringHash(name.c_str(), 0xFFFF);
 	refCount = 0;
 	tex = new r_tex_c(renderer->texMan, name, flags);
-	if (tex->error) {
+	if (!(flags & TF_ASYNC) && tex->error.load(std::memory_order_relaxed)) {
 		renderer->sys->con->Warning("couldn't load texture '%s'", name.c_str());
 	}
 }
@@ -169,16 +170,13 @@ struct r_layerCmdQuad_s {
 r_layer_c::r_layer_c(r_renderer_c* renderer, int layer, int subLayer)
 	: renderer(renderer), layer(layer), subLayer(subLayer)
 {
-	cmdStorage.resize(1ull << 23);
-	cmdCursor = 0;
-	numCmd = 0;
 }
 
 r_layer_c::~r_layer_c()
 {
 }
 
-static size_t CommandSize(r_layerCmd_s::Command cmd, size_t extraSize = 0) {
+static size_t CommandSize(r_layerCmd_s::Command cmd) {
 	using Tag = r_layerCmd_s::Command;
 	switch (cmd) {
 	case Tag::VIEWPORT: return sizeof(r_layerCmdViewport_s);
@@ -191,12 +189,53 @@ static size_t CommandSize(r_layerCmd_s::Command cmd, size_t extraSize = 0) {
 	}
 }
 
+static size_t AlignCommandSize(size_t size)
+{
+	constexpr size_t alignment = alignof(std::max_align_t);
+	const size_t remainder = size % alignment;
+	if (remainder == 0) {
+		return size;
+	}
+	const size_t padding = alignment - remainder;
+	return size > std::numeric_limits<size_t>::max() - padding ? 0 : size + padding;
+}
+
+bool r_layer_c::AddCommandBlock(size_t minimumCapacity)
+{
+	constexpr size_t defaultCapacity = 64 * 1024;
+	const size_t previousCapacity = cmdStorage.empty() ? 0 : cmdStorage.back().capacity;
+	size_t requestedCapacity = (std::max)(minimumCapacity, defaultCapacity);
+	if (previousCapacity > 0 && previousCapacity <= std::numeric_limits<size_t>::max() / 2) {
+		requestedCapacity = (std::max)(requestedCapacity, previousCapacity * 2);
+	}
+	requestedCapacity = AlignCommandSize(requestedCapacity);
+	if (requestedCapacity == 0) {
+		return false;
+	}
+
+	try {
+		CmdStorageBlock block;
+		block.data.reset(::operator new(requestedCapacity));
+		block.capacity = requestedCapacity;
+		cmdStorage.push_back(std::move(block));
+		return true;
+	}
+	catch (std::bad_alloc const&) {
+		return false;
+	}
+}
+
 r_layer_c::CmdHandle r_layer_c::GetFirstCommand()
 {
 	CmdHandle ret{};
-	ret.offset = 0;
-	if (cmdCursor > 0) {
-		ret.cmd = (r_layerCmd_s*)cmdStorage.data();
+	for (size_t blockIndex = 0; blockIndex < cmdStorage.size(); ++blockIndex) {
+		auto const& block = cmdStorage[blockIndex];
+		if (block.used > 0) {
+			ret.block = blockIndex;
+			ret.offset = 0;
+			ret.cmd = reinterpret_cast<r_layerCmd_s*>(block.data.get());
+			break;
+		}
 	}
 	return ret;
 }
@@ -206,30 +245,68 @@ bool r_layer_c::GetNextCommand(r_layer_c::CmdHandle& handle)
 	if (handle.cmd == nullptr) {
 		return false;
 	}
-	handle.offset += (uint32_t)CommandSize(handle.cmd->cmd);
-	if (handle.offset >= cmdCursor) {
-		handle.cmd = nullptr;
-		return false;
+	handle.offset += AlignCommandSize(CommandSize(handle.cmd->cmd));
+	auto const& block = cmdStorage[handle.block];
+	if (handle.offset < block.used) {
+		handle.cmd = reinterpret_cast<r_layerCmd_s*>(
+			reinterpret_cast<std::byte*>(block.data.get()) + handle.offset);
+		return true;
 	}
-	handle.cmd = (r_layerCmd_s*)(cmdStorage.data() + handle.offset);
-	return true;
+
+	for (++handle.block; handle.block < cmdStorage.size(); ++handle.block) {
+		auto const& nextBlock = cmdStorage[handle.block];
+		if (nextBlock.used > 0) {
+			handle.offset = 0;
+			handle.cmd = reinterpret_cast<r_layerCmd_s*>(nextBlock.data.get());
+			return true;
+		}
+	}
+	handle.cmd = nullptr;
+	return false;
 }
 
-r_layerCmd_s* r_layer_c::NewCommand(size_t size)
+void* r_layer_c::NewCommand(size_t size)
 {
-	size_t const cmdEnd = cmdCursor + size;
-	if (cmdEnd >= cmdStorage.size()) {
+	const size_t alignedSize = AlignCommandSize(size);
+	if (alignedSize == 0 || alignedSize < size) {
 		return nullptr;
 	}
-	auto *ret = (r_layerCmd_s*)(cmdStorage.data() + cmdCursor);
-	cmdCursor = cmdEnd;
-	++numCmd;
-	return ret;
+
+	for (;;) {
+		if (cmdStorage.empty() || alignedSize > cmdStorage.back().capacity - cmdStorage.back().used) {
+			if (!AddCommandBlock(alignedSize)) {
+				return nullptr;
+			}
+		}
+
+		auto& block = cmdStorage.back();
+		if (alignedSize > block.capacity - block.used) {
+			if (!AddCommandBlock(alignedSize)) {
+				return nullptr;
+			}
+			continue;
+		}
+
+		auto* const bytes = reinterpret_cast<std::byte*>(block.data.get());
+		auto* const result = bytes + block.used;
+		// Zero both tail padding and the object payload so a command digest never
+		// reads indeterminate bytes and command structures start fully defined.
+		memset(result, 0, alignedSize);
+		block.used += alignedSize;
+		if (cmdCursor > std::numeric_limits<size_t>::max() - alignedSize) {
+			block.used -= alignedSize;
+			return nullptr;
+		}
+		cmdCursor += alignedSize;
+		++numCmd;
+		return result;
+	}
 }
 
 void r_layer_c::SetViewport(r_viewport_s* viewport)
 {
-	if (auto* cmd = (r_layerCmdViewport_s*)NewCommand(CommandSize(r_layerCmd_s::VIEWPORT))) {
+	if (auto* storage = NewCommand(CommandSize(r_layerCmd_s::VIEWPORT))) {
+		auto* cmd = new (storage) r_layerCmdViewport_s{};
 		cmd->cmd = r_layerCmd_s::VIEWPORT;
 		cmd->viewport.x = viewport->x;
 		cmd->viewport.y = viewport->y;
@@ -240,7 +317,8 @@ void r_layer_c::SetViewport(r_viewport_s* viewport)
 
 void r_layer_c::SetBlendMode(int mode)
 {
-	if (auto* cmd = (r_layerCmdBlend_s*)NewCommand(CommandSize(r_layerCmd_s::BLEND))) {
+	if (auto* storage = NewCommand(CommandSize(r_layerCmd_s::BLEND))) {
+		auto* cmd = new (storage) r_layerCmdBlend_s{};
 		cmd->cmd = r_layerCmd_s::BLEND;
 		cmd->blendMode = mode;
 	}
@@ -248,7 +326,8 @@ void r_layer_c::SetBlendMode(int mode)
 
 void r_layer_c::Bind(r_tex_c* tex)
 {
-	if (auto* cmd = (r_layerCmdBind_s*)NewCommand(CommandSize(r_layerCmd_s::BIND))) {
+	if (auto* storage = NewCommand(CommandSize(r_layerCmd_s::BIND))) {
+		auto* cmd = new (storage) r_layerCmdBind_s{};
 		cmd->cmd = r_layerCmd_s::BIND;
 		cmd->tex = tex;
 	}
@@ -256,7 +335,8 @@ void r_layer_c::Bind(r_tex_c* tex)
 
 void r_layer_c::Color(col4_t col)
 {
-	if (auto* cmd = (r_layerCmdColor_s*)NewCommand(CommandSize(r_layerCmd_s::COLOR))) {
+	if (auto* storage = NewCommand(CommandSize(r_layerCmd_s::COLOR))) {
+		auto* cmd = new (storage) r_layerCmdColor_s{};
 		cmd->cmd = r_layerCmd_s::COLOR;
 		Vector4Copy(col, cmd->col);
 	}
@@ -264,7 +344,8 @@ void r_layer_c::Color(col4_t col)
 
 void r_layer_c::Quad(float s0, float t0, float x0, float y0, float s1, float t1, float x1, float y1, float s2, float t2, float x2, float y2, float s3, float t3, float x3, float y3, int stackLayer, int maskLayer)
 {
-	if (auto* cmd = (r_layerCmdQuad_s*)NewCommand(CommandSize(r_layerCmd_s::QUAD))) {
+	if (auto* storage = NewCommand(CommandSize(r_layerCmd_s::QUAD))) {
+		auto* cmd = new (storage) r_layerCmdQuad_s{};
 		cmd->cmd = r_layerCmd_s::QUAD;
 		cmd->quad.s[0] = s0; cmd->quad.s[1] = s1; cmd->quad.s[2] = s2; cmd->quad.s[3] = s3;
 		cmd->quad.t[0] = t0; cmd->quad.t[1] = t1; cmd->quad.t[2] = t2; cmd->quad.t[3] = t3;
@@ -442,6 +523,7 @@ struct AdjacentMergeStrategy : RenderStrategy {
 		}
 		mvpMatrixLoc_ = glGetUniformLocation(prog_, "mvp_matrix");
 		batchTextureCap_ = texLocs_.size();
+		batch_.textures.reserve(batchTextureCap_);
 		glGenBuffers(1, &vbo_);
 	}
 
@@ -654,9 +736,7 @@ private:
 	GLuint vbo_{};
 
 	struct TexturedBatch {
-		explicit TexturedBatch(GLuint prog) : batch(prog) {
-			textures.reserve(1ull << 20);
-		}
+		explicit TexturedBatch(GLuint prog) : batch(prog) {}
 
 		BatchKey key{};
 		Batch batch;
@@ -717,8 +797,28 @@ void r_layer_c::Render()
 
 void r_layer_c::Discard()
 {
+	for (auto& block : cmdStorage) {
+		block.used = 0;
+	}
 	cmdCursor = 0;
 	numCmd = 0;
+}
+
+static uint64_t HashLayerCommands(r_layer_c const& layer)
+{
+	uint64_t hash = 0;
+	for (auto const& block : layer.cmdStorage) {
+		auto const* data = reinterpret_cast<uint8_t const*>(block.data.get());
+		size_t remaining = block.used;
+		while (remaining > 0) {
+			const int chunkSize = static_cast<int>((std::min)(
+				remaining, static_cast<size_t>(std::numeric_limits<int>::max())));
+			hash = MurmurHash64A(data, chunkSize, hash);
+			data += chunkSize;
+			remaining -= static_cast<size_t>(chunkSize);
+		}
+	}
+	return hash;
 }
 
 // =====================
@@ -1084,7 +1184,7 @@ void r_renderer_c::Init(r_featureFlag_e features)
 	ImGui::SetCurrentContext(imguiCtx);
 
 	ImGui_ImplGlfw_InitForOpenGL((GLFWwindow*)sys->video->GetWindowHandle(), true);
-	ImGui_ImplOpenGL3_Init("#version 100");
+	ImGui_ImplOpenGL3_Init("#version 300 es");
 
 	fonts[F_FIXED] = new r_font_c(this, "Bitstream Vera Sans Mono");
 	fonts[F_VAR] = new r_font_c(this, "Liberation Sans");
@@ -1108,6 +1208,7 @@ void r_renderer_c::Shutdown()
 	ImGui::DestroyContext(imguiCtx);
 
 	delete whiteImage;
+	delete blackImage;
 
 	for (int f = 0; f < F_NUMFONTS; f++) {
 		delete fonts[f];
@@ -1120,11 +1221,11 @@ void r_renderer_c::Shutdown()
 	for (int l = 0; l < numLayer; l++) {
 		delete layerList[l];
 	}
-	delete layerList;
+	delete[] layerList;
 	for (int c = 0; c < layerCmdBinCount; c++) {
 		delete layerCmdBin[c];
 	}
-	delete layerCmdBin;
+	delete[] layerCmdBin;
 
 	for (int i = 0; i < 2; ++i) {
 		auto& rtt = rttMain[i];
@@ -1386,53 +1487,36 @@ void r_renderer_c::EndFrame()
 		lastFrameHash.clear();
 	}
 
-	std::future<std::optional<std::vector<uint8_t>>> elidedFrameHashFut;
+	std::optional<std::vector<uint8_t>> commandDigest;
 	if (elideFrames) {
-		elidedFrameHashFut = std::async([&]() -> std::optional<std::vector<uint8_t>> {
-			std::vector<uint8_t> commandDigest;
-
-			for (auto lIdx = 0; lIdx < numLayer; ++lIdx) {
-				auto layer = layerSort[lIdx];
-				uint64_t subHash = MurmurHash64A(layer->cmdStorage.data(), (int)layer->cmdCursor, 0ull);
-				uint8_t const* p = (uint8_t const*)&subHash;
-				commandDigest.insert(commandDigest.end(), p, p + sizeof(subHash));
-			}
-
-			return commandDigest;
-		});
+		commandDigest.emplace();
+		commandDigest->reserve(static_cast<size_t>(numLayer) * sizeof(uint64_t));
+		for (auto lIdx = 0; lIdx < numLayer; ++lIdx) {
+			auto layer = layerSort[lIdx];
+			uint64_t const subHash = HashLayerCommands(*layer);
+			auto const* p = reinterpret_cast<uint8_t const*>(&subHash);
+			commandDigest->insert(commandDigest->end(), p, p + sizeof(subHash));
+		}
 	}
-	else {
-		std::promise<std::optional<std::vector<uint8_t>>> p;
-		elidedFrameHashFut = p.get_future();
-		p.set_value({});
-	}
-
-	elidedFrameHashFut.wait();
 
 	++totalFrames;
-	bool decideDraw = false;
 	bool elideDraw = false;
+	if (commandDigest) {
+		if (*commandDigest == lastFrameHash) {
+			elideDraw = true;
+		}
+		else {
+			lastFrameHash = *commandDigest;
+		}
+	}
+	else {
+		lastFrameHash.clear();
+	}
+
 	{
 		glBindFramebuffer(GL_FRAMEBUFFER, GetDrawRenderTarget().framebuffer);
 		glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
-		int l{};
-		for (l = 0; l < numLayer; l++) {
-			if (!decideDraw && elidedFrameHashFut.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
-				decideDraw = true;
-				auto commandDigest = elidedFrameHashFut.get();
-				if (commandDigest) {
-					if (*commandDigest == lastFrameHash) {
-						elideDraw = true;
-						break;
-					}
-					else {
-						lastFrameHash = *commandDigest;
-					}
-				}
-				else {
-					lastFrameHash.clear();
-				}
-			}
+		for (int l = 0; !elideDraw && l < numLayer; l++) {
 			auto& layer = layerSort[l];
 			if (layerBreak && layerBreak->first == layer->layer && layerBreak->second == layer->subLayer) {
 #ifdef _WIN32
@@ -1444,15 +1528,6 @@ void r_renderer_c::EndFrame()
 		if (!elideDraw) {
 			presentRtt = 1 - presentRtt;
 			++drawnFrames;
-		}
-	}
-
-	if (!decideDraw) {
-		if (auto commandDigest = elidedFrameHashFut.get()) {
-			lastFrameHash = *commandDigest;
-		}
-		else {
-			lastFrameHash.clear();
 		}
 	}
 
@@ -1568,14 +1643,15 @@ std::optional<int> r_shaderHnd_c::StackCount() const
 {
 	if (!sh || sh->tex->status != r_tex_c::Status::DONE)
 		return {};
-	return (int)sh->tex->stackLayers;
+	return static_cast<int>(sh->tex->stackLayers.load());
 }
 
 void r_renderer_c::PurgeShaders()
 {
 	// Delete released shaders
 	for (int s = 0; s < numShader; s++) {
-		if (shaderList[s] && shaderList[s]->refCount == 0 && shaderList[s]->tex->status == r_tex_c::DONE) {
+		if (shaderList[s] && shaderList[s]->refCount == 0 &&
+			(shaderList[s]->tex->status == r_tex_c::DONE || shaderList[s]->tex->status == r_tex_c::INIT)) {
 			delete shaderList[s];
 			shaderList[s] = NULL;
 		}
@@ -1686,8 +1762,12 @@ void r_renderer_c::SetDrawLayer(int layer, int subLayer)
 	}
 	if (!newCurLayer) {
 		if (numLayer == layerListSize) {
-			layerListSize <<= 1;
-			trealloc(layerList, layerListSize);
+			const int newLayerListSize = layerListSize << 1;
+			auto** newLayerList = new r_layer_c*[newLayerListSize];
+			std::copy(layerList, layerList + numLayer, newLayerList);
+			delete[] layerList;
+			layerList = newLayerList;
+			layerListSize = newLayerListSize;
 		}
 		layerList[numLayer] = new r_layer_c(this, layer, subLayer);
 		newCurLayer = layerList[numLayer];
@@ -1775,7 +1855,14 @@ void r_renderer_c::DrawImageQuad(r_shaderHnd_c* hnd, glm::vec2 p0, glm::vec2 p1,
 {
 	if (hnd) {
 		curLayer->Bind(hnd->sh->tex);
-		stackLayer = clamp(stackLayer, 0, (int)hnd->sh->tex->stackLayers - 1);
+		if (hnd->sh->tex->status == r_tex_c::DONE) {
+			stackLayer = clamp(stackLayer, 0, static_cast<int>(hnd->sh->tex->stackLayers.load()) - 1);
+		}
+		else {
+			// A worker may still be decoding the image. Avoid reading its layer
+			// metadata until the terminal status publishes it.
+			stackLayer = 0;
+		}
 	}
 	else {
 		curLayer->Bind(whiteImage->sh->tex);
@@ -2022,20 +2109,21 @@ r_renderer_c::RenderTarget& r_renderer_c::GetPresentRenderTarget()
 #define BIG_CONSTANT(x) (x##LLU)
 #endif
 
-static inline uint64_t MurmurHashGetBlock(const uint64_t* p)
+static inline uint64_t MurmurHashGetBlock(const uint8_t* p)
 {
 #if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
-	return *p;
+	uint64_t value = 0;
+	memcpy(&value, p, sizeof(value));
+	return value;
 #else
-	const uint8_t* c = (const uint8_t*)p;
-	return (uint64_t)c[0] |
-		(uint64_t)c[1] << 8 |
-		(uint64_t)c[2] << 16 |
-		(uint64_t)c[3] << 24 |
-		(uint64_t)c[4] << 32 |
-		(uint64_t)c[5] << 40 |
-		(uint64_t)c[6] << 48 |
-		(uint64_t)c[7] << 56;
+	return (uint64_t)p[0] |
+		(uint64_t)p[1] << 8 |
+		(uint64_t)p[2] << 16 |
+		(uint64_t)p[3] << 24 |
+		(uint64_t)p[4] << 32 |
+		(uint64_t)p[5] << 40 |
+		(uint64_t)p[6] << 48 |
+		(uint64_t)p[7] << 56;
 #endif
 }
 
@@ -2046,12 +2134,13 @@ uint64_t MurmurHash64A(const void* key, int len, uint64_t seed)
 
 	uint64_t h = seed ^ (len * m);
 
-	const uint64_t* data = (const uint64_t*)key;
-	const uint64_t* end = data + (len / 8);
+	const uint8_t* data = static_cast<const uint8_t*>(key);
+	const uint8_t* end = data + (len / 8) * 8;
 
 	while (data != end)
 	{
-		uint64_t k = MurmurHashGetBlock(data++);
+		uint64_t k = MurmurHashGetBlock(data);
+		data += 8;
 
 		k *= m;
 		k ^= k >> r;
@@ -2061,7 +2150,7 @@ uint64_t MurmurHash64A(const void* key, int len, uint64_t seed)
 		h *= m;
 	}
 
-	const unsigned char* data2 = (const unsigned char*)data;
+	const unsigned char* data2 = data;
 
 	switch (len & 7)
 	{

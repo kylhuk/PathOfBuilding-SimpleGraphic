@@ -1,7 +1,7 @@
 {
   "default-registry": {
     "kind": "builtin",
-    "baseline": "66c0373dc7fca549e5803087b9487edfe3aca0a1"
+    "baseline": "827a2e1203bc19941126c657166da44f2623acc4"
   },
   "registries": [
     {
@@ -10,5 +10,6 @@
       "baseline": "2026-07-22",
       "packages": ["glfw3", "gli", "luajit"]
     }
-  ]
+  ],
+  "overlay-triplets": ["vcpkg-triplets"]
 }
