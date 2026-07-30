@@ -178,6 +178,7 @@ jobs:
           # vcpkg cannot download its x64-only tool bundle in this container.
           docker run --rm \
             --platform linux/386 \
+            --user 0:0 \
             --volume "$GITHUB_WORKSPACE:/src" \
             --workdir /src \
             --env VCPKG_DISABLE_METRICS \
