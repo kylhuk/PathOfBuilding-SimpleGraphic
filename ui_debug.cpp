@@ -132,7 +132,16 @@ void ui_debug_c::RecordHook(lua_State* state, lua_Debug* activation)
 		call = std::prev(callHits.end());
 	}
 	++call->count;
-	AddLineHit(call->lineHits, current);
+
+	// The call group identifies the currently executing function. Its nested
+	// lines must identify the Lua caller that invoked it, matching the historic
+	// profiler report and making hot call sites actionable.
+	lua_Debug caller{};
+	if (lua_getstack(state, 1, &caller)
+		&& lua_getinfo(state, "Sln", &caller)
+		&& caller.source) {
+		AddLineHit(call->lineHits, caller);
+	}
 }
 
 void ui_debug_c::ReportAndReset()

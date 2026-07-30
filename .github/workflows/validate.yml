@@ -28,5 +28,8 @@ jobs:
       - name: Validate the source and CI contract
         run: python3 scripts/ci/validate_project.py
 
+      - name: Test release metadata tooling
+        run: python3 scripts/ci/test_release_tools.py
+
       - name: Check patch whitespace
         run: git diff --check HEAD^ HEAD

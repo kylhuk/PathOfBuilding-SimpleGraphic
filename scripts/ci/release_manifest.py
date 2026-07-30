@@ -36,9 +36,9 @@ def main() -> int:
     checksum_lines = []
     for archive in archives:
         checksum = sha256(archive)
-        relative = archive.relative_to(directory).as_posix()
-        checksum_lines.append(f"{checksum}  {relative}")
-        assets.append({"file": relative, "sha256": checksum, "bytes": archive.stat().st_size})
+        filename = archive.name
+        checksum_lines.append(f"{checksum}  {filename}")
+        assets.append({"file": filename, "sha256": checksum, "bytes": archive.stat().st_size})
 
     (directory / "SHA256SUMS.txt").write_text("\n".join(checksum_lines) + "\n", encoding="utf-8")
     (directory / "release-manifest.json").write_text(

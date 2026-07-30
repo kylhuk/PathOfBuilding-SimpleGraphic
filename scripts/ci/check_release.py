@@ -21,6 +21,7 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
+    numeric_version = args.version.split("-", 1)[0].split("+", 1)[0]
 
     root = args.root.resolve()
     try:
@@ -38,9 +39,21 @@ def main() -> int:
         "config.h": config_version.group(1) if config_version else None,
         "vcpkg.json": manifest.get("version-semver"),
     }
-    mismatched = {name: version for name, version in declared.items() if version != args.version}
+    expected = {
+        "CMake": numeric_version,
+        "config.h": args.version,
+        "vcpkg.json": args.version,
+    }
+    mismatched = {
+        name: (expected[name], version)
+        for name, version in declared.items()
+        if version != expected[name]
+    }
     if mismatched:
-        rendered = ", ".join(f"{name}={version!r}" for name, version in mismatched.items())
+        rendered = ", ".join(
+            f"{name}=expected {expected_version!r}, got {actual_version!r}"
+            for name, (expected_version, actual_version) in mismatched.items()
+        )
         print(f"release version {args.version!r} does not match project metadata ({rendered})", file=sys.stderr)
         return 2
     return 0

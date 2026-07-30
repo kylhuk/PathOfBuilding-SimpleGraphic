@@ -73,6 +73,18 @@ def main() -> int:
                 raise RuntimeError("LuaSocket core modules do not have distinct build output directories")
         if "runtime_smoke.cpp" not in cmake or "SimpleGraphicRuntimeSmoke" not in require(ROOT / "runtime_smoke.cpp") or "--smoke-modules" not in require(ROOT / "launcher/main.cpp"):
             raise RuntimeError("staged runtime smoke coverage is missing")
+        launcher = require(ROOT / "launcher/main.cpp")
+        if "std::filesystem::absolute(" not in launcher or "std::vector<char*> runtimeArgs" not in launcher:
+            raise RuntimeError("standalone launcher does not preserve caller-relative script paths")
+        debug = require(ROOT / "ui_debug.cpp")
+        if "lua_getstack(state, 1, &caller)" not in debug or "AddLineHit(call->lineHits, caller)" not in debug:
+            raise RuntimeError("profiler hot-call lines are not attributed to callers")
+        release_manifest = require(ROOT / "scripts/ci/release_manifest.py")
+        if "filename = archive.name" not in release_manifest:
+            raise RuntimeError("release metadata does not name flattened release assets")
+        check_release = require(ROOT / "scripts/ci/check_release.py")
+        if "numeric_version = args.version.split" not in check_release:
+            raise RuntimeError("release metadata does not support prerelease version cores")
         runtime_dependency_start = cmake.index(
             "install(RUNTIME_DEPENDENCY_SET simplegraphic_runtime_dependencies"
         )

@@ -104,6 +104,10 @@ The repository uses four workflows:
   current `master` tip, builds all eight packages, produces SHA-256 checksums,
   and creates the GitHub release.
 
+For a prerelease, `CMakeLists.txt` retains the numeric version core while
+`config.h` and `vcpkg.json` declare the complete SemVer string (for example
+`2.6.0-rc.1`). The manual workflow checks both forms before it creates a tag.
+
 Release archives contain one top-level directory named for their target,
 which makes them safe inputs to setup/installer tooling. The release includes
 `SHA256SUMS.txt` and `release-manifest.json` for automated packagers.

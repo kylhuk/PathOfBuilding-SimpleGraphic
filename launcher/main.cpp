@@ -1,6 +1,8 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <string>
+#include <vector>
 
 #include "config.h"
 #include "simplegraphic.h"
@@ -32,6 +34,17 @@ int main(int argc, char** argv)
     }
 
     // The runtime ABI treats argv[0] as the Lua script, rather than an
-    // executable name.  Preserve that convention for the standalone host.
-    return RunLuaFileAsWin(argc - 1, argv + 1);
+    // executable name. Resolve it before that ABI changes the process CWD to
+    // the runtime directory; retain every remaining script argument verbatim.
+    std::error_code error;
+    const auto scriptPath = std::filesystem::absolute(
+        std::filesystem::u8path(argv[1]), error);
+    if (error) {
+        std::fprintf(stderr, "Unable to resolve the Lua script path: %s\n", error.message().c_str());
+        return 2;
+    }
+    auto scriptArgument = scriptPath.generic_u8string();
+    std::vector<char*> runtimeArgs(argv + 1, argv + argc);
+    runtimeArgs.front() = scriptArgument.data();
+    return RunLuaFileAsWin(static_cast<int>(runtimeArgs.size()), runtimeArgs.data());
 }
