@@ -9,6 +9,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
 
 
 def run(command: list[str], *, cwd: Path, env: dict[str, str]) -> None:
@@ -24,11 +25,54 @@ def require_file(path: Path) -> None:
         raise RuntimeError(f"required runtime file is missing: {path}")
 
 
+def macos_loader_paths(path: Path) -> tuple[list[str], list[str]]:
+    dependencies = subprocess.run(
+        ["otool", "-L", str(path)], text=True, capture_output=True, check=False
+    )
+    if dependencies.returncode:
+        raise RuntimeError(f"could not inspect dylib dependencies for {path}")
+
+    loaded = []
+    for line in dependencies.stdout.splitlines()[1:]:
+        entry = line.strip().split(" (", 1)[0]
+        if entry:
+            loaded.append(entry)
+
+    load_commands = subprocess.run(
+        ["otool", "-l", str(path)], text=True, capture_output=True, check=False
+    )
+    if load_commands.returncode:
+        raise RuntimeError(f"could not inspect loader paths for {path}")
+
+    rpaths: list[str] = []
+    command_is_rpath = False
+    for line in load_commands.stdout.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("cmd "):
+            command_is_rpath = stripped == "cmd LC_RPATH"
+        elif command_is_rpath and stripped.startswith("path "):
+            rpaths.append(stripped[5:].split(" (", 1)[0])
+            command_is_rpath = False
+    return loaded, rpaths
+
+
 def check_loader_paths(platform: str, files: list[Path]) -> None:
     command = "readelf" if platform == "linux" else "otool"
     if platform == "windows" or not shutil.which(command):
         return
     for path in files:
+        if platform == "macos":
+            dependencies, rpaths = macos_loader_paths(path)
+            for dependency in dependencies:
+                if dependency.startswith(("/System/Library/", "/usr/lib/")):
+                    continue
+                if dependency.startswith("/"):
+                    raise RuntimeError(
+                        f"{path} loads a non-relocatable absolute dependency: {dependency}"
+                    )
+            for rpath in rpaths:
+                if rpath.startswith("/"):
+                    raise RuntimeError(f"{path} contains a non-relocatable absolute rpath: {rpath}")
         args = [command, "-d", str(path)] if platform == "linux" else [command, "-l", str(path)]
         result = subprocess.run(args, text=True, capture_output=True, check=False)
         if result.returncode:
@@ -37,6 +81,36 @@ def check_loader_paths(platform: str, files: list[Path]) -> None:
         forbidden = ("vcpkg_installed", "/workspace/", "/users/runner/work/")
         if any(value in lowered for value in forbidden):
             raise RuntimeError(f"{path} contains a build-machine loader path")
+
+
+def clean_loader_environment(platform: str) -> dict[str, str]:
+    environment = os.environ.copy()
+    prefix = "DYLD_" if platform == "macos" else "LD_"
+    for key in list(environment):
+        if key.startswith(prefix):
+            environment.pop(key)
+    if platform == "macos":
+        # An unset fallback asks dyld to restore its default search path.
+        # Keep it explicitly empty so the copied package cannot accidentally
+        # resolve a library from the original build environment.
+        environment["DYLD_FALLBACK_LIBRARY_PATH"] = ""
+        environment["DYLD_FALLBACK_FRAMEWORK_PATH"] = ""
+    return environment
+
+
+def relocation_directory() -> tempfile.TemporaryDirectory[str]:
+    runner_temp = os.environ.get("RUNNER_TEMP")
+    location = runner_temp if runner_temp and Path(runner_temp).is_dir() else None
+    return tempfile.TemporaryDirectory(prefix="simplegraphic-runtime-", dir=location)
+
+
+def verify_runtime(host: Path, runtime: Path, platform: str, files: list[Path]) -> None:
+    environment = clean_loader_environment(platform)
+    if platform == "windows":
+        environment["PATH"] = str(runtime) + os.pathsep + environment.get("PATH", "")
+    run([str(host), "--version"], cwd=runtime, env=environment)
+    run([str(host), "--smoke-modules"], cwd=runtime, env=environment)
+    check_loader_paths(platform, files)
 
 
 def main() -> int:
@@ -67,20 +141,29 @@ def main() -> int:
     for path in [host, simplegraphic, *module_paths, *lua_paths]:
         require_file(path)
 
-    environment = os.environ.copy()
+    runtime_files = [host, simplegraphic, *module_paths]
     if args.platform == "windows":
-        environment["PATH"] = str(runtime) + os.pathsep + environment.get("PATH", "")
+        verify_runtime(host, runtime, args.platform, runtime_files)
     else:
-        # This must be a genuinely relocatable package test. Supplying a
-        # library-path override would hide a missing $ORIGIN/@loader_path from
-        # the staged payload and let an unpacked release fail for users.
-        environment.pop("LD_LIBRARY_PATH", None)
-        environment.pop("DYLD_LIBRARY_PATH", None)
-        environment.pop("DYLD_FALLBACK_LIBRARY_PATH", None)
-    run([str(host), "--version"], cwd=runtime, env=environment)
-    run([str(host), "--smoke-modules"], cwd=runtime, env=environment)
-    check_loader_paths(args.platform, [host, simplegraphic, *module_paths])
-    print(f"verified staged {args.platform} runtime: {runtime}")
+        # Execute a byte-for-byte copy from an unrelated working directory.
+        # This catches dependencies that happen to resolve only while the
+        # original build/stage tree remains available on the CI worker.
+        with relocation_directory() as temporary:
+            relocated_root = Path(temporary)
+            relocated_runtime = relocated_root / "runtime"
+            relocated_working_directory = relocated_root / "working-directory"
+            shutil.copytree(runtime, relocated_runtime, symlinks=True)
+            relocated_working_directory.mkdir()
+            relocated_files = [
+                relocated_runtime / path.relative_to(runtime) for path in runtime_files
+            ]
+            verify_runtime(
+                relocated_runtime / host.name,
+                relocated_working_directory,
+                args.platform,
+                relocated_files,
+            )
+    print(f"verified relocatable {args.platform} runtime: {runtime}")
     return 0
 
 
